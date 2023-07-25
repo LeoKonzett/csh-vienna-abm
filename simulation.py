@@ -71,6 +71,29 @@ class Lattice:
         self.repopulate_empty_cells = False  # Repopulate dead villages - don't if no mutations for skill and env.
         self.metropolis_scale = 1  # scaling factor for metropolis algorithm
 
+    def init_env_from_gaez(self, input_arr):
+        """ load environment based on gaez v4 data set (33 AEZ classes, 5 arc-minute resolution)
+        input data is an integer array with entries {0, 33}, where 0 is water and 32 is built-up land.
+        precise docs can be found at Gaez V4 user guide, page 162.
+        output data is a 3D array with exactly one non-zero entry along the last axis that denotes
+        the AEZ class to which the village belongs.
+        """
+        assert np.all(input_arr.shape == self.shape[1:]), f"Input with shape {input_arr.shape} doesn't match " \
+                                                          f"shape {self.shape[1:]}."
+        variables = np.unique(input_arr)  # different AEZ classes
+
+        self.num_env_vars = variables.size
+        self.num_skill_vars = self.num_env_vars  # update skill variables  # TODO: Currently overwrites constructor
+
+        self.env = np.zeros([*input_arr.shape, self.num_env_vars], dtype=input_arr.dtype)
+        for idx, val in enumerate(variables):  # start from 1 to skip water entries
+            mask = input_arr == val
+            self.env[mask, idx] = 1
+
+        # if successful, sum along last axis is unity
+        assert np.all(np.sum(self.env, axis=-1) == 1), f"sum is non-unity and is {np.sum(self.env, axis=-1)}"
+
+
     def init_env_perlin(self, scale=0.1):
         """Create an environment of shape (size, size, num_entries) with Perlin noise.
         This yields spatially correlated noise. scale gives the correlation length"""
