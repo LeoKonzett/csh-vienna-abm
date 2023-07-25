@@ -81,7 +81,7 @@ class GlobalAezV4:
 
         if verbose:
             print("\n Distance matrix has shape ", self._distance_array.shape,
-                  "\n Window of Interest has colums and rows ", self._ncols, self._nrows)
+                  "\n Window of Interest has columns and rows ", self._ncols, self._nrows)
 
     def get_arc_distance(self, p_origin, p_targets_r, p_targets_c):
         """ To come. No lat / long conversion needed as the distance matrix takes care of that."""
@@ -89,18 +89,8 @@ class GlobalAezV4:
 
         # longitude is row, latitude is column
         r_deltas = np.abs(r0 - p_targets_r)  # only relative difference matters
-        print(r_deltas)
 
         # first axis is relative longitudinal difference, second axis is latitude 1, third axis is latitude 2
         distances = self._distance_array[r_deltas, c0, p_targets_c]  # c0 gets broadcast to match the array shapes
 
         return distances
-
-# # Test class
-# data_dir = r"C:\Users\leoko\Documents\Vienna_CSH\gaez_v4_data"
-# fn = "aez_33_classes_low_res.tif"
-#
-# test_class = GlobalAezV4()
-# test_class.load(os.path.join(data_dir, fn), idx=0)
-# test_class.set_woi(r0=300, c0=2000, n_rows=400, n_cols=600)
-# test_class.get_distance_matrix()
