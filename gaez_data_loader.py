@@ -1,7 +1,6 @@
 # Imports
 
 import numpy as np
-import os
 from libtiff import TIFF
 
 
@@ -9,15 +8,15 @@ class GlobalAezV4:
     """Loader class for the Global Agro-Ecological Zones (GAEZ) version 4 data set published by UN FAO."""
     _array = np.array([0])
     _distance_array = np.array([0.])
-    _radius_eq, _radius_to_centre = 40_000, 6371 # approx. in km # TODO: These are constants, define as such.
+    _radius_eq, _radius_to_centre = 40_000, 6371  # approx. in km # TODO: These are constants, define as such.
     _csize_km, _csize_deg = 0, 0
-    _nrows, _ncols = 0, 0 # for window of interest - zero if no woi
-    _lat_start, _long_start = -90, -180 # in degrees
+    _nrows, _ncols = 0, 0  # for window of interest - zero if no woi
+    _lat_start, _long_start = -90, -180  # in degrees
 
     def load(self, fp, verbose=True, idx=0):
         """Load TIF data as image using LIBTIFF.
             Contains multiple images -> pick highest resolution (i.e. idx = 0) by default. """
-        img_container = TIFF.open(fp).iter_images() # returns generator object
+        img_container = TIFF.open(fp).iter_images()  # returns generator object
 
         count = 0
         while count <= idx:
@@ -47,7 +46,7 @@ class GlobalAezV4:
         self._lat_start = 90 - r0 * self._csize_deg
         self._long_start = -180 + c0 * self._csize_deg
 
-        self._array = self._array[r0:r0+n_rows, c0:c0+n_cols]
+        self._array = self._array[r0:r0 + n_rows, c0:c0 + n_cols]
 
     def get_distance_matrix(self, verbose=False):
         """
@@ -56,7 +55,8 @@ class GlobalAezV4:
         instead of np.meshgrid(), we use numpy broadcasting to save memory
         """
         latitudes = np.linspace(self._lat_start, self._lat_start + (self._nrows - 1) * self._csize_deg, self._nrows)
-        longitudes_diff = np.linspace(0, (self._ncols -1) * self._csize_deg, self._ncols) # only relative values needed
+        longitudes_diff = np.linspace(0, (self._ncols - 1) * self._csize_deg,
+                                      self._ncols)  # only relative values needed
 
         # prepare for broadcasting
         longitudes_diff = longitudes_diff[:, None, None]
@@ -64,8 +64,8 @@ class GlobalAezV4:
         lat_vals_y = latitudes[None, None, :]
 
         # get distance - problem: We have a memory error but broadcasting works like a charm
-        num_elements= self._ncols * self._nrows ** 2
-        if num_elements > pow(10, 8): # raise error if matrix takes more than ~ 100 MB
+        num_elements = self._ncols * self._nrows ** 2
+        if num_elements > pow(10, 8):  # raise error if matrix takes more than ~ 100 MB
             raise MemoryError("Not enough memory can be allocated, consider a smaller window of interest.")
 
         # convert to radians
@@ -88,11 +88,11 @@ class GlobalAezV4:
         r0, c0 = p_origin
 
         # longitude is row, latitude is column
-        r_deltas = np.abs(r0 - p_targets_r) # only relative difference matters
+        r_deltas = np.abs(r0 - p_targets_r)  # only relative difference matters
         print(r_deltas)
 
         # first axis is relative longitudinal difference, second axis is latitude 1, third axis is latitude 2
-        distances = self._distance_array[r_deltas, c0, p_targets_c] # c0 gets broadcast to match the array shapes
+        distances = self._distance_array[r_deltas, c0, p_targets_c]  # c0 gets broadcast to match the array shapes
 
         return distances
 
