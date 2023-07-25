@@ -20,7 +20,7 @@ class Lattice:
         self.r0, self.c0 = idx_start  # location of first settlement
         self.size = size  # 1d size of square lattice
         self.shape = (steps_sim, size, size)  # only square lattice - time is 0 axis
-        self.population = np.zeros(self.shape)
+        self.population = np.zeros(self.shape)  # TODO: Two arrays A) Total population 1D and 2D population per step
         self.population[0, self.r0, self.c0] = 10  # 10 people initially
 
         self.num_env_vars = num_env_vars
@@ -267,6 +267,7 @@ class Lattice:
             candidates_r = candidates_r[within_lattice]
             candidates_c = candidates_c[within_lattice]
 
+            # TODO: Also picks villages below the productivity threshold
             if not self.search_intelligently:  # pick village to migrate to at random
                 probabilities = None  # we pick one candidate regardless of empty or occupied villages
 
@@ -280,6 +281,7 @@ class Lattice:
 
                     # Check if productivity of neighboring cells is above thresh and if cells are empty
                     mask = (prods > self.prod_threshold) & self.is_empty[candidates_r, candidates_c]
+                    candidates_r, candidates_c = candidates_r[mask], candidates_c[mask]
                     prods = prods[mask]
                     if prods.size == 0:
                         continue  # continue if no valid neighbors

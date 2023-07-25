@@ -54,7 +54,7 @@ def get_distribution(inputs, mn=None):
     """Calculate a probability distribution based on rescaling a nd-array inputs between 0 and 1."""
     # min - max scaling
     mx = np.amax(inputs)
-    if min is None:
+    if mn is None:
         mn = np.amin(inputs)
 
     if mx == mn:  # min-max scaling yields NaN - assign uniform distribution
