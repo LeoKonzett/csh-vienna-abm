@@ -281,7 +281,6 @@ class Lattice:
 
                     # Check if productivity of neighboring cells is above thresh and if cells are empty
                     mask = (prods > self.prod_threshold) & self.is_empty[candidates_r, candidates_c]
-                    candidates_r, candidates_c = candidates_r[mask], candidates_c[mask]
                     prods = prods[mask]
                     if prods.size == 0:
                         continue  # continue if no valid neighbors
@@ -290,7 +289,14 @@ class Lattice:
 
                 else:  # probability distribution to choose which occupied village splits
                     populations = self.population[self.num_iter, candidates_r, candidates_c]
-                    probabilities = toolbox.get_distribution(populations, mn=None)
+                    mask = populations > self.pop_min
+                    populations = populations[mask]
+                    if populations.size == 0:
+                        continue  # continue if no villages have enough population
+
+                    probabilities = toolbox.get_distribution(populations, mn=self.pop_min)
+
+                candidates_r, candidates_c = candidates_r[mask], candidates_c[mask]  # prob. and cand. have equal dims
 
             # distribution is either None (uniform) or some nd-array - select accordingly
             idx_select = self.rng.choice(range(candidates_r.size), p=probabilities)
