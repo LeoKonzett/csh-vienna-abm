@@ -5,31 +5,30 @@ import logging
 import toolbox
 
 
+# TODO: General. I have too many small functions that are used only once. We only need functions if we re-use.
+
 class Lattice:
     """Base object for population dynamics in medieval Europe. Square lattice.
     Central object is a square lattice with shape (time, x, x) which keeps the track of the population in each village.
     """
 
-    def __init__(self, size=10, steps_sim=5_000, seed=50, idx_start=(0, 0), num_env_vars=10,
-                 pop_min=100, pop_max=500, rate_growth=1 / 30, prod_min=1, rate_prod=200):
-        """ Initializes lattice object with shape (time=steps_sim, size, size). assumes that env. vector
+    def __init__(self, steps_sim=5_000, seed=50, idx_start=(0, 0), num_env_vars=10,
+                 pop_min=100, pop_max=500, rate_growth=1 / 30, prod_min=1, rate_prod=200,
+                 n_rows=10, n_cols=10, env=None):
+        """ Initializes lattice object with shape (time=steps_sim, n_rows, n_cols). assumes that env. vector
         and skill vector have the same length. Also initializes environment and skill vectors to calculate productivity.
         Current data type of population array is float (integer messes up the update rule)
         """
-        self.rng = np.random.default_rng(seed=seed)  # initialize RNG
+        self.rng = np.random.default_rng(seed=seed)
         self.r0, self.c0 = idx_start  # location of first settlement
-        self.size = size  # 1d size of square lattice
-        self.shape = (steps_sim, size, size)  # only square lattice - time is 0 axis
+        self.shape = (steps_sim, n_rows, n_cols)  # only square lattice - time is 0 axis
         self.population = np.zeros(self.shape)  # TODO: Two arrays A) Total population 1D and 2D population per step
         self.population[0, self.r0, self.c0] = 10  # 10 people initially
 
-        self.num_env_vars = num_env_vars
-        self.num_skill_vars = num_env_vars  # assume same length for environment and skill vectors
         # min / max population for a village to split (i.e. split with p=1 above max)
         self.pop_min, self.pop_max = pop_min, pop_max
 
         self.rate_growth = rate_growth  # set growth of population rate
-        self.env = self.init_env_perlin(scale=0.2)  # perlin env with scale 0.2 for now
         self.rate_prod = rate_prod  # If this is large, small changes in the productivity are amplified
 
         # Deal with negative population growth:
@@ -37,37 +36,40 @@ class Lattice:
         self.prod_min = prod_min
         assert prod_min >= 0 and isinstance(prod_min, int), "Provide minimum productivity as positive integer"
         if prod_min <= thresh:
-            logging.warning("Negative population growth might overshoot. Population gets clipped to zero.")
+            print("In Lattice.init().: To avoid negative population, clip population to zero.")
             self.clip_population_to_zero = True
         else:
             self.clip_population_to_zero = False
 
+        # load environment # TODO: Refactor
+        if env is None:
+            self.num_env_vars = num_env_vars
+            self.env = self.init_env_perlin(scale=0.2)  # perlin env with scale 0.2 for now
+        else:
+            assert np.all(env.shape == self.shape[1:]), f"Input with shape {env.shape} doesn't match " \
+                                                        f"shape {self.shape[1:]}."
+            self.init_env_from_gaez(env)  # loads self.env
+
         # initialize skills - assign random bin. vector with length (num_skill_vars) to starting village
-        self.skills = np.zeros((size, size, self.num_skill_vars))
+        self.num_skill_vars = self.num_env_vars
+        self.skills = np.zeros_like(self.env)
         self.skills[self.r0, self.c0] = self.rng.integers(size=self.num_skill_vars, low=0, high=1, endpoint=True)
-        self.prod = np.zeros((size, size))
+        self.prod = np.zeros((n_rows, n_cols))
         self.prod = toolbox.calculate_productivity(self.skills, self.env,
                                                    prod_scaling=self.rate_prod, min_prod=self.prod_min)
 
         self.num_iter = 1
-        self.has_valid_neighbors = np.ones((size, size))  # whether a village has empty neighbors
-        self.has_valid_neighbors = self.has_valid_neighbors > 0  # in the beginning all cells have empty neighbors
+        self.is_empty = self.population[0, :, :] == 0  # flag empty cells
 
-        self.is_empty = np.zeros((size, size))  # whether a village is empty
-        self.is_empty[self.r0, self.c0] = 1  # all villages except starting loc are empty
-        self.is_empty = self.is_empty == 0  # or .astype(bool)
-
+        # TODO: Add reminder that these MUST be initialized or give warning if they aren't
         self.indices_r, self.indices_c = [], []  # indices to select neighbors
-        # If productivity is below this threshold, villagers stay idle. Init. equal to min. productivity.
-        self.prod_threshold = 0
+        self.prod_threshold = 0  # min. productivity for villagers to migrate
         self.search_intelligently = False  # If True, select cells probabilistically based on productivity
 
         self.env_mutation_rate = None  # Probability that one entry of the environment vector per site flips
         self.skill_mutation_rate = None  # Same but for skills
-        self.skill_mutates_randomly = True  # If skills mutate randomly or a more elaborate scheme is used (e.g. metropolis)
+        self.skill_mutates_randomly = True  # True is random mutation, False is Metropolis mutation
 
-        # TODO: Should be always set to True - and no minimum productivity - only thing is that then cells die immediately
-        # I.E. maybe delete attribute minimum productivity at all
         self.repopulate_empty_cells = False  # Repopulate dead villages - don't if no mutations for skill and env.
         self.metropolis_scale = 1  # scaling factor for metropolis algorithm
 
@@ -78,14 +80,10 @@ class Lattice:
         output data is a 3D array with exactly one non-zero entry along the last axis that denotes
         the AEZ class to which the village belongs.
         """
-        assert np.all(input_arr.shape == self.shape[1:]), f"Input with shape {input_arr.shape} doesn't match " \
-                                                          f"shape {self.shape[1:]}."
         variables = np.unique(input_arr)  # different AEZ classes
-
         self.num_env_vars = variables.size
-        self.num_skill_vars = self.num_env_vars  # update skill variables  # TODO: Currently overwrites constructor
 
-        self.env = np.zeros([*input_arr.shape, self.num_env_vars], dtype=input_arr.dtype)
+        self.env = np.zeros([*input_arr.shape, self.num_env_vars], dtype=float)
         for idx, val in enumerate(variables):  # start from 1 to skip water entries
             mask = input_arr == val
             self.env[mask, idx] = 1
@@ -93,14 +91,13 @@ class Lattice:
         # if successful, sum along last axis is unity
         assert np.all(np.sum(self.env, axis=-1) == 1), f"sum is non-unity and is {np.sum(self.env, axis=-1)}"
 
-
     def init_env_perlin(self, scale=0.1):
         """Create an environment of shape (size, size, num_entries) with Perlin noise.
         This yields spatially correlated noise. scale gives the correlation length"""
         # Populate environment with spatially correlated variables
-        env_perlin = np.zeros((self.size, self.size, self.num_env_vars))
-        for ii in range(self.size):
-            for jj in range(self.size):
+        env_perlin = np.zeros((*self.shape[1:], self.num_env_vars))
+        for ii in range(self.shape[1]):  # rows
+            for jj in range(self.shape[2]):  # columns
                 env_perlin[ii, jj] = [noise.pnoise3(ii * scale, jj * scale, k * scale) for k in
                                       range(self.num_env_vars)]
 
@@ -194,7 +191,7 @@ class Lattice:
 
         ratio = np.power(ratio, scale)  # apply custom scaling
 
-        nums = self.rng.uniform(low=0, high=1., size=(self.size, self.size))
+        nums = self.rng.uniform(low=0, high=1., size=self.prod.shape)
         accept_flip = ratio > nums  # accept flip dep. on ratio
 
         self.skills[accept_flip] = skills_update[accept_flip]
@@ -207,7 +204,7 @@ class Lattice:
         E.g. for a NxN lattice, we have one expected flip per function call if p_flip = 1 / (NxN)
         If mask is not None, flip only where Mask is True (in addition to random draw)
         """
-        nums = self.rng.uniform(low=0, high=1, size=(self.size, self.size))
+        nums = self.rng.uniform(low=0, high=1, size=self.prod.shape)
         mask = nums < p_flip  # select cells for which a flip happens
 
         if mask_additional is not None:
@@ -215,10 +212,10 @@ class Lattice:
             mask = mask & mask_additional
 
         # select number between 0 and num_env_vars for each cell
-        flip_indices = self.rng.choice(range(self.num_env_vars), size=(self.size, self.size))
+        flip_indices = self.rng.choice(range(self.num_env_vars), size=self.prod.shape)
 
         # flip values where mask is True - alternative is np.ix_() for easy broadcasting
-        rows, columns = np.arange(self.size), np.arange(self.size)
+        rows, columns = np.arange(self.shape[1]), np.arange(self.shape[2])
         replacement_vals = np.logical_xor(array[rows[:, np.newaxis], columns, flip_indices], mask).astype(int)
 
         # replace the values - modifies the array in place
@@ -242,11 +239,11 @@ class Lattice:
 
         # Get split probability - based on global float draw
         prob_to_split = self.get_split_probs(self.population[self.num_iter])
-        floats = self.rng.uniform(low=0.0, high=1.0, size=(self.size, self.size))
+        floats = self.rng.uniform(low=0.0, high=1.0, size=self.prod.shape)
 
         # Count the number of cells that want to split and set helper variable
         num_cells_splitting = np.sum(prob_to_split > floats)
-        if num_cells_splitting <= (self.size ** 2 / 2):
+        if num_cells_splitting <= (np.prod(self.prod.shape) / 2):
             search_empty_cells = True
         else:
             search_empty_cells = False
@@ -285,8 +282,8 @@ class Lattice:
             candidates_c = self.indices_c + cc
 
             # Check if within lattice # TODO: Get directly from memory to avoid check? Speed-up?
-            within_lattice = (0 <= candidates_r) & (candidates_r < self.size) & (0 <= candidates_c) & (
-                    candidates_c < self.size)
+            within_lattice = (0 <= candidates_r) & (candidates_r < self.shape[1]) & (0 <= candidates_c) & (
+                    candidates_c < self.shape[2])
             candidates_r = candidates_r[within_lattice]
             candidates_c = candidates_c[within_lattice]
 
