@@ -19,6 +19,7 @@ class Lattice:
         and skill vector have the same length. Also initializes environment and skill vectors to calculate productivity.
         Current data type of population array is float (integer messes up the update rule)
         """
+        # TODO: Refactor checks to improve readability
         self.rng = np.random.default_rng(seed=seed)
         self.r0, self.c0 = idx_start  # location of first settlement
         self.shape = (steps_sim, n_rows, n_cols)  # only square lattice - time is 0 axis
@@ -41,7 +42,7 @@ class Lattice:
         else:
             self.clip_population_to_zero = False
 
-        # load environment # TODO: Refactor
+        # load environment
         if env is None:
             self.num_env_vars = num_env_vars
             self.env = self.init_env_perlin(scale=0.2)  # perlin env with scale 0.2 for now
@@ -49,6 +50,13 @@ class Lattice:
             assert np.all(env.shape == self.shape[1:]), f"Input with shape {env.shape} doesn't match " \
                                                         f"shape {self.shape[1:]}."
             self.init_env_from_gaez(env)  # loads self.env
+
+        print(f"Cell productivity varies in steps {self.rate_prod / self.num_env_vars}. In case of GAEZ env., "
+              f"this is also the maximum productivity.")
+        assert self.rate_prod / self.num_env_vars > self.pop_max, "With current parameters, " \
+                                                                  "village will not split. Increase either" \
+                                                                  "productivity base rate or reduce " \
+                                                                  "population required to split."
 
         # initialize skills - assign random bin. vector with length (num_skill_vars) to starting village
         self.num_skill_vars = self.num_env_vars
@@ -93,11 +101,14 @@ class Lattice:
 
         # handle water - can be extended to other variables
         if water_var in variables:
-            print("In meth. init_env_from_gaez(): Input environment contains water. Set to zero."
+            print("In Lattice.init_env_from_gaez(): Input environment contains water. Set to zero. "
                   "Ensure that productivity settlement threshold is above 1 to avoid settling water.")
             is_water = input_arr == water_var
             water_idx = np.squeeze(np.argwhere(variables == water_var))
             self.env[is_water, water_idx] = 0
+
+            if is_water[self.r0, self.c0]:  # starting location in water
+                raise Exception("Staring point is in water. Choose different point.")
 
     def init_env_perlin(self, scale=0.1):
         """Create an environment of shape (size, size, num_entries) with Perlin noise.
@@ -121,39 +132,6 @@ class Lattice:
         raw = factor * (population - self.pop_min)
         return np.clip(raw, 0, 1)
 
-    def update_population(self, pop_current):
-        """Updates the population according to discrete solution of logistic ODE.
-        If prod << 1, then the population will turn negative if non-zero (as e.g. after a split).
-        To avoid this, we clip the population to zero.
-        To avoid division by zero error, we add an epsilon to the divisor.
-        Alternatively, we can clip to e.g. -100 to distinguish "dead" from empty villages.
-        NB: np.divide(x, 0) with x > 0 returns np.inf. np.divide(0, 0) returns np.nan
-        (happens e.g. if population and productivity are both zero)
-        Problem: If cell has been populated, but the productivity is zero, then the population will go to zero
-        and in the NEXT iteration we will again have NAN. To avoid that, we check is_empty attribute
-        """
-        with np.errstate(divide="ignore", invalid="ignore"):
-            pop_new = pop_current + self.rate_growth * pop_current * (1 - np.divide(pop_current, self.prod))
-        assert pop_new.dtype == self.population.dtype
-
-        if np.any(pop_new - pop_current < 1) and np.issubdtype(self.population.dtype, np.integer):
-            logging.warning("In meth. update_population: Increase in population of one village is less than unity.")
-
-        if self.clip_population_to_zero:
-            np.clip(pop_new, 0, None, out=pop_new)
-            mask = np.isnan(pop_new) & np.logical_not(self.is_empty)  # check if village has been occupied and is NaN
-            pop_new[mask] = 0
-
-        # These checks are for safety - add way to run this in verbose mode?
-        if np.any(pop_new < 0):
-            raise ValueError("Population is negative. Either increase minimum productivity or set it to None to"
-                             "clip array")
-
-        if np.any(np.isnan(pop_new) & np.logical_not(self.is_empty)):
-            raise ValueError("A village that has been populated has a population of NAN instead of zero")
-
-        return pop_new
-
     def set_search_params(self, prod_threshold=100, neigh_type="von_neumann", distance=1, search_intelligently=False):
         """ Sets the type of search environment. For now: Lattice with Moore and VN neighborhoods.
         If the productivity of the selected cell is below prod_threshold, the cell doesn't split.
@@ -161,6 +139,7 @@ class Lattice:
         """
         self.indices_r, self.indices_c = toolbox.set_neighborhood(distance=distance, neigh_type=neigh_type)
         self.prod_threshold = prod_threshold
+        assert self.prod_threshold > 0, "Current version requires a settlement threshold > 0"
         self.search_intelligently = search_intelligently
 
     def set_evolution_params(self, env_mutation_rate=None, skill_mutation_rate=None, skill_mutates_randomly=True,
@@ -191,7 +170,6 @@ class Lattice:
                                                        min_prod=self.prod_min)
 
         skills_update = self.flip_single_entry_per_cell(self.skills, p_flip=p_flip, mask_additional=mask_additional)
-
         prod_update = toolbox.calculate_productivity(skills_update, self.env, prod_scaling=self.rate_prod,
                                                      min_prod=self.prod_min)
         with np.errstate(divide="ignore", invalid="ignore"):  # ignore division by zero warning
@@ -216,6 +194,7 @@ class Lattice:
         mask = nums < p_flip  # select cells for which a flip happens
 
         if mask_additional is not None:
+            print("In Lattice.flip_single_entry_per_cell: mask_additional not None. Deprecated.")
             assert mask.dtype == bool, "Requires boolean mask"
             mask = mask & mask_additional
 
@@ -240,10 +219,38 @@ class Lattice:
          NB: If the number of villages that want to split exceeds a threshold, we apply a reverse search
          strategy. That is, we look for **empty** villages that have occupied neighbors, and select a cell that
          will split. """
+        # run mutations
+        if self.env_mutation_rate is not None:
+            self.env = self.flip_single_entry_per_cell(self.env, p_flip=self.env_mutation_rate)
+
+        if self.skill_mutation_rate is not None:
+            if self.skill_mutates_randomly:
+                self.skills = self.flip_single_entry_per_cell(self.skills, p_flip=self.skill_mutation_rate,
+                                                              mask_additional=None)
+            else:
+                self.skills = self.mutate_skill_metropolis(p_flip=self.skill_mutation_rate,
+                                                           mask_additional=None, scale=10)
+
         # calculate productivity to update village population
         self.prod = toolbox.calculate_productivity(self.skills, self.env,
                                                    prod_scaling=self.rate_prod, min_prod=self.prod_min)
-        self.population[self.num_iter] = self.update_population(self.population[self.num_iter - 1])
+
+        # get empty cells from previous iteration
+        self.is_empty = self.population[self.num_iter - 1] == 0
+
+        # update population - empty cells will stay empty regardless of productivity
+        with np.errstate(divide="ignore", invalid="ignore"):
+            if self.population[self.num_iter - 1, self.r0, self.c0] < 1:
+                self.population[self.num_iter - 1, self.r0, self.c0] = 1  # ensure one villager remains
+
+            # TODO: Could be optimized for memory usage but Lattice.migrate_to() takes more run-time
+            self.population[self.num_iter] = self.population[self.num_iter - 1] + \
+                self.rate_growth * self.population[self.num_iter - 1] \
+                * (1 - np.divide(self.population[self.num_iter - 1], self.prod))
+
+        if self.clip_population_to_zero:  # set NaN or negative populations to zero
+            mask = np.isnan(self.population[self.num_iter]) | (self.population[self.num_iter] < 0)
+            self.population[self.num_iter][mask] = 0
 
         # Get split probability - based on global float draw
         prob_to_split = self.get_split_probs(self.population[self.num_iter])
@@ -256,9 +263,7 @@ class Lattice:
         else:
             search_empty_cells = False
 
-        self.is_empty = self.population[self.num_iter] == 0
         cells_that_split = prob_to_split > floats
-
         if search_empty_cells:  # villagers that move to empty locations
             idx_r, idx_c = np.nonzero(cells_that_split)
         else:  # reverse search
@@ -266,19 +271,6 @@ class Lattice:
 
         if idx_r.size > 0:
             self.migrate_to(idx_r, idx_c, search_empty_cells=search_empty_cells)
-
-        # run mutations
-        if self.env_mutation_rate is not None:
-            self.env = self.flip_single_entry_per_cell(self.env, p_flip=self.env_mutation_rate)
-
-        if self.skill_mutation_rate is not None:
-            is_occupied = np.logical_not(self.is_empty)  # migrate_to updates is_empty flags
-            if self.skill_mutates_randomly:
-                self.skills = self.flip_single_entry_per_cell(self.skills, p_flip=self.skill_mutation_rate,
-                                                              mask_additional=is_occupied)
-            else:
-                self.skills = self.mutate_skill_metropolis(p_flip=self.skill_mutation_rate,
-                                                           mask_additional=is_occupied, scale=10)
 
     def migrate_to(self, idx_r, idx_c, search_empty_cells=True):
         """ This is the core loop that is intended for NUMBA to vastly speed up the FOR loop.
