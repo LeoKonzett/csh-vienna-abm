@@ -73,9 +73,9 @@ class Lattice:
         self.repopulate_empty_cells = False  # Repopulate dead villages - don't if no mutations for skill and env.
         self.metropolis_scale = 1  # scaling factor for metropolis algorithm
 
-    def init_env_from_gaez(self, input_arr):
+    def init_env_from_gaez(self, input_arr, water_var=0):
         """ load environment based on gaez v4 data set (33 AEZ classes, 5 arc-minute resolution)
-        input data is an integer array with entries {0, 33}, where 0 is water and 32 is built-up land.
+        input data is an integer array with entries {0, 33}, where 0 is water (water_var) and 32 is built-up land.
         precise docs can be found at Gaez V4 user guide, page 162.
         output data is a 3D array with exactly one non-zero entry along the last axis that denotes
         the AEZ class to which the village belongs.
@@ -90,6 +90,14 @@ class Lattice:
 
         # if successful, sum along last axis is unity
         assert np.all(np.sum(self.env, axis=-1) == 1), f"sum is non-unity and is {np.sum(self.env, axis=-1)}"
+
+        # handle water - can be extended to other variables
+        if water_var in variables:
+            print("In meth. init_env_from_gaez(): Input environment contains water. Set to zero."
+                  "Ensure that productivity settlement threshold is above 1 to avoid settling water.")
+            is_water = input_arr == water_var
+            water_idx = np.squeeze(np.argwhere(variables == water_var))
+            self.env[is_water, water_idx] = 0
 
     def init_env_perlin(self, scale=0.1):
         """Create an environment of shape (size, size, num_entries) with Perlin noise.
