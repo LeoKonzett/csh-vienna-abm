@@ -11,6 +11,7 @@ class Lattice:
     """Base object for population dynamics in medieval Europe. Square lattice.
     Central object is a square lattice with shape (time, x, x) which keeps the track of the population in each village.
     """
+    _gaez_instance = None  # instance of GlobalAezV4 in gaez_data_loader.py
 
     def __init__(self, steps_sim=5_000, seed=50, idx_start=(0, 0), num_env_vars=10,
                  pop_min=100, pop_max=500, rate_growth=1 / 30, prod_min=1, rate_prod=200,
@@ -51,7 +52,7 @@ class Lattice:
                                                         f"shape {self.shape[1:]}."
             self.init_env_from_gaez(env)  # loads self.env
 
-        print(f"Cell productivity varies in steps {self.rate_prod / self.num_env_vars}. In case of GAEZ env., "
+        print(f"Cell productivity varies in steps {int(self.rate_prod / self.num_env_vars)}. In case of GAEZ env., "
               f"this is also the maximum productivity.")
         assert self.rate_prod / self.num_env_vars > self.pop_max, "With current parameters, " \
                                                                   "village will not split. Increase either" \
@@ -77,6 +78,7 @@ class Lattice:
         self.env_mutation_rate = None  # Probability that one entry of the environment vector per site flips
         self.skill_mutation_rate = None  # Same but for skills
         self.skill_mutates_randomly = True  # True is random mutation, False is Metropolis mutation
+        self.max_distance = None  # maximum distance between two points in km
 
         self.repopulate_empty_cells = False  # Repopulate dead villages - don't if no mutations for skill and env.
         self.metropolis_scale = 1  # scaling factor for metropolis algorithm
@@ -126,13 +128,20 @@ class Lattice:
 
         return env_perlin
 
+    def load_gaez_instance(self, gaez_instance):
+        """load an instance of Global_AEZ data. Is pass-by-reference"""
+        self._gaez_instance = gaez_instance
+        # TODO: Don't access private variables
+        assert gaez_instance._nrows == self.shape[1] and gaez_instance._ncols == self.shape[2]
+
     def get_split_probs(self, population):
         """ Calculate the probability that each village splits. Uses uniform cdf."""
         factor = 1 / (self.pop_max - self.pop_min)
         raw = factor * (population - self.pop_min)
         return np.clip(raw, 0, 1)
 
-    def set_search_params(self, prod_threshold=100, neigh_type="von_neumann", distance=1, search_intelligently=False):
+    def set_search_params(self, prod_threshold=100, neigh_type="von_neumann", distance=1,
+                          search_intelligently=False, max_distance_km=None):
         """ Sets the type of search environment. For now: Lattice with Moore and VN neighborhoods.
         If the productivity of the selected cell is below prod_threshold, the cell doesn't split.
         distance attribute sets the size of the neighborhoods (e.g. distance 1 for Moore is 3x3)
@@ -141,6 +150,9 @@ class Lattice:
         self.prod_threshold = prod_threshold
         assert self.prod_threshold > 0, "Current version requires a settlement threshold > 0"
         self.search_intelligently = search_intelligently
+        if max_distance_km is not None:
+            self.max_distance = max_distance_km
+            print(f"Villagers have maximum search radius of {max_distance_km} kilometres.")
 
     def set_evolution_params(self, env_mutation_rate=None, skill_mutation_rate=None, skill_mutates_randomly=True,
                              metropolis_scale=1, repopulate_empty_cells=False):
@@ -286,6 +298,13 @@ class Lattice:
                     candidates_c < self.shape[2])
             candidates_r = candidates_r[within_lattice]
             candidates_c = candidates_c[within_lattice]
+
+            # TODO: Ask Daniel how to make this more efficient
+            if self.max_distance is not None:
+                distances = self._gaez_instance.get_arc_distance((rr, cc), candidates_r, candidates_c)
+                mask = distances < self.max_distance
+                candidates_r = candidates_r[mask]
+                candidates_c = candidates_c[mask]
 
             # TODO: Also picks villages below the productivity threshold
             if not self.search_intelligently:  # pick village to migrate to at random
