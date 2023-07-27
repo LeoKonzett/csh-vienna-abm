@@ -87,10 +87,10 @@ class GlobalAezV4:
         """ To come. No lat / long conversion needed as the distance matrix takes care of that."""
         r0, c0 = p_origin
 
-        # longitude is row, latitude is column
-        r_deltas = np.abs(r0 - p_targets_r)  # only relative difference matters
+        # longitude is column, latitude is row
+        c_deltas = np.abs(c0 - p_targets_c)  # only relative difference matters
 
         # first axis is relative longitudinal difference, second axis is latitude 1, third axis is latitude 2
-        distances = self._distance_array[r_deltas, c0, p_targets_c]  # c0 gets broadcast to match the array shapes
+        distances = self._distance_array[c_deltas, r0, p_targets_r]  # c0 gets broadcast to match the array shapes
 
         return distances
