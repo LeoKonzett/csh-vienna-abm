@@ -196,6 +196,45 @@ class Lattice:
 
         return self.skills
 
+    def mutate_skill_diff_ratios(self, probabilities=None, mutation_rate=None):
+        """Skill mutation happens with rate r. We identify 4 different cases:
+        Gain of useful skill. Loss of useful skill. Gain of useless skill.
+        Loss of useless skill. We assign different probabilities for all 4 cases."""
+        if probabilities is None:  # uniform distribution
+            probabilities = [0.25] * 4
+        else:
+            assert len(probabilities) == 4, "Provide 4 probability values."
+
+        p_gain_useful, p_gain_useless, p_lose_useful, p_lose_useless = probabilities
+
+        nums = self.rng.uniform(low=0, high=1, size=self.prod.shape)
+
+        # get r/c indices of cells for which a flip happens
+        idx_r, idx_c = np.nonzero(nums > mutation_rate)
+
+        # pick a random number for each flipped cell
+        idx_flip = self.rng.choice(range(self.num_env_vars), size=idx_r.size)
+
+        # extract relevant values
+        env_vals = self.env[idx_r, idx_c, idx_flip]
+        skill_vals = self.skills[idx_r, idx_c, idx_flip]
+
+        # update skills
+        skill_vals_flip = np.logical_not(skill_vals).astype(int)
+
+        # get product
+        product = skill_vals_flip * env_vals
+
+        # decide if flip is accepted
+
+
+        # update skill values
+        replacement_vals = np.logical_xor(array[rows[:, np.newaxis], columns, flip_indices], mask).astype(int)
+
+        # copy values - else caller also sees modification
+        array_flip = np.copy(array)
+        array_flip[rows[:, np.newaxis], columns, flip_indices] = replacement_vals
+
     def flip_single_entry_per_cell(self, array, p_flip=0.01, mask_additional=None):
         """Flip one randomly selected entry (uniform pdf with rng) with probability p_flip.
         Env has shape (N, N, 10) - we need NxN random floats in [0, 1].
@@ -217,7 +256,7 @@ class Lattice:
         rows, columns = np.arange(self.shape[1]), np.arange(self.shape[2])
         replacement_vals = np.logical_xor(array[rows[:, np.newaxis], columns, flip_indices], mask).astype(int)
 
-        # replace the values - modifies the array in place
+        # copy values - else caller also sees modification
         array_flip = np.copy(array)
         array_flip[rows[:, np.newaxis], columns, flip_indices] = replacement_vals
 
