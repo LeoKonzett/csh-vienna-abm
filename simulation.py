@@ -208,10 +208,10 @@ class Lattice:
         p_gain_useful, p_gain_useless, p_lose_useful, p_lose_useless = probabilities
 
         nums = self.rng.uniform(low=0, high=1, size=self.prod.shape)
-        mask_2d = nums > mutation_rate
 
         # get r/c indices of cells for which a flip happens
-        idx_r, idx_c = np.nonzero(mask_2d)
+        # TODO: Add condition that cell must be occupied
+        idx_r, idx_c = np.nonzero(nums < mutation_rate)
 
         # pick a random number for each flipped cell
         idx_flip = self.rng.choice(range(self.num_env_vars), size=idx_r.size)
@@ -221,17 +221,17 @@ class Lattice:
         skill_vals = self.skills[idx_r, idx_c, idx_flip]
 
         # get acceptance probabilities
-        m1 = (skill_vals == 0 & env_vals == 0)  # gain skill that isn't used
-        m2 = (skill_vals == 0 & env_vals == 1)  # gain skill that is used
-        m3 = (skill_vals == 1 & env_vals == 0)  # lose skill that isn't used
+        m1 = (skill_vals == 0) & (env_vals == 0)  # gain skill that isn't used
+        m2 = (skill_vals == 0) & (env_vals == 1)  # gain skill that is used
+        m3 = (skill_vals == 1) & (env_vals == 0)  # lose skill that isn't used
 
         probabilities = np.select([m1, m2, m3], [p_gain_useless, p_gain_useful, p_lose_useless], default=p_lose_useful)
         nums = self.rng.uniform(low=0, high=1, size=env_vals.size)
-        mask_1d = nums > probabilities
+        mask_1d = nums < probabilities
         
         # enable accepted flips and replace
         replacement_vals = np.logical_xor(skill_vals, mask_1d).astype(int)
-        self.skills[mask_2d] = replacement_vals
+        self.skills[idx_r, idx_c, idx_flip] = replacement_vals
 
     def flip_single_entry_per_cell(self, array, p_flip=0.01, mask_additional=None):
         """Flip one randomly selected entry (uniform pdf with rng) with probability p_flip.
@@ -280,9 +280,12 @@ class Lattice:
                 self.skills = self.mutate_skill_metropolis(p_flip=self.skill_mutation_rate,
                                                            mask_additional=None, scale=10)
                 
-            elif self.mutation_method == "4_rates":  # TODO: Ordering in probabilities is important - FIX
+            elif self.mutation_method == "4_rates":  # TODO: Ordering in probabilities is important - use keywords
                 self.mutate_skill_diff_ratios(mutation_rate=self.skill_mutation_rate,
-                                              probabilities=(0.3, 0.1, 0.2, 0.9))  # u g, non-u g, u l, non-u l
+                                              probabilities=(0.99, 0.01, 0.01, 0.99))  # u g, non-u g, u l, non-u l
+
+            else:
+                raise Exception("Mutation method not implemented. Valid methods are random, metropolis, and 4_rates.")
 
         # calculate productivity to update village population
         self.prod = toolbox.calculate_productivity(self.skills, self.env,
@@ -396,7 +399,7 @@ class Lattice:
                 self.is_empty[rr, cc] = False
                 self.skills[rr, cc] = self.skills[r0, c0]
 
-    def run(self, disable_progress_bar=False):
+    def run(self, disable_progress_bar=False, track_skill_start=False):
         """Run the simulation for #sim_steps. If mutate_env is not None, at each iteration
         the entries of each binary vector get flipped with prob. mutate_env. Same for mutate_skill.
         If disable_progress_bar is True, do not print tqdm progressbar.
@@ -405,6 +408,10 @@ class Lattice:
         if not any(self.indices_r):
             raise ValueError("Run method set_search_params first")
 
+        self.skill_array = np.zeros((self.shape[0], self.num_skill_vars))
+
         for _ in tqdm(range(1, self.population.shape[0]), leave=True, disable=disable_progress_bar):
+            if track_skill_start:
+                self.skill_array[self.num_iter-1] = self.skills[self.r0, self.c0]
             self.move_forward()
             self.num_iter += 1
