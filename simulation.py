@@ -282,7 +282,7 @@ class Lattice:
                 
             elif self.mutation_method == "4_rates":  # TODO: Ordering in probabilities is important - use keywords
                 self.mutate_skill_diff_ratios(mutation_rate=self.skill_mutation_rate,
-                                              probabilities=(0.99, 0.01, 0.01, 0.99))  # u g, non-u g, u l, non-u l
+                                              probabilities=(1., 0.01, 0.01, 0.99))  # u g, non-u g, u l, non-u l
 
             else:
                 raise Exception("Mutation method not implemented. Valid methods are random, metropolis, and 4_rates.")
