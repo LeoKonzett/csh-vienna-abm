@@ -77,7 +77,7 @@ class Lattice:
 
         self.env_mutation_rate = None  # Probability that one entry of the environment vector per site flips
         self.skill_mutation_rate = None  # Same but for skills
-        self.skill_mutates_randomly = True  # True is random mutation, False is Metropolis mutation
+        self.mutation_method = None  # True is random mutation, False is Metropolis mutation
         self.max_distance = None  # maximum distance between two points in km
 
         self.repopulate_empty_cells = False  # Repopulate dead villages - don't if no mutations for skill and env.
@@ -154,13 +154,13 @@ class Lattice:
             self.max_distance = max_distance_km
             print(f"Villagers have maximum search radius of {max_distance_km} kilometres.")
 
-    def set_evolution_params(self, env_mutation_rate=None, skill_mutation_rate=None, skill_mutates_randomly=True,
+    def set_evolution_params(self, env_mutation_rate=None, skill_mutation_rate=None, mutation_method="metropolis",
                              metropolis_scale=1, repopulate_empty_cells=False):
         """Sets / updates parameters for evolution, e.g. environment / skill mutation rate or prod. scaling factor.
         For now, only updates the mutation rates."""
         self.env_mutation_rate = env_mutation_rate  # environment mutation rate
         self.skill_mutation_rate = skill_mutation_rate  # skill mutation rate
-        self.skill_mutates_randomly = skill_mutates_randomly  # mutate directionally (metropolis) or random
+        self.mutation_method = mutation_method  # mutate directionally (metropolis) or random
         self.metropolis_scale = metropolis_scale  # scaling ratio for Metropolis
         self.repopulate_empty_cells = repopulate_empty_cells  # repopulate dead villages
 
@@ -208,9 +208,10 @@ class Lattice:
         p_gain_useful, p_gain_useless, p_lose_useful, p_lose_useless = probabilities
 
         nums = self.rng.uniform(low=0, high=1, size=self.prod.shape)
+        mask_2d = nums > mutation_rate
 
         # get r/c indices of cells for which a flip happens
-        idx_r, idx_c = np.nonzero(nums > mutation_rate)
+        idx_r, idx_c = np.nonzero(mask_2d)
 
         # pick a random number for each flipped cell
         idx_flip = self.rng.choice(range(self.num_env_vars), size=idx_r.size)
@@ -219,21 +220,18 @@ class Lattice:
         env_vals = self.env[idx_r, idx_c, idx_flip]
         skill_vals = self.skills[idx_r, idx_c, idx_flip]
 
-        # update skills
-        skill_vals_flip = np.logical_not(skill_vals).astype(int)
+        # get acceptance probabilities
+        m1 = (skill_vals == 0 & env_vals == 0)  # gain skill that isn't used
+        m2 = (skill_vals == 0 & env_vals == 1)  # gain skill that is used
+        m3 = (skill_vals == 1 & env_vals == 0)  # lose skill that isn't used
 
-        # get product
-        product = skill_vals_flip * env_vals
-
-        # decide if flip is accepted
-
-
-        # update skill values
-        replacement_vals = np.logical_xor(array[rows[:, np.newaxis], columns, flip_indices], mask).astype(int)
-
-        # copy values - else caller also sees modification
-        array_flip = np.copy(array)
-        array_flip[rows[:, np.newaxis], columns, flip_indices] = replacement_vals
+        probabilities = np.select([m1, m2, m3], [p_gain_useless, p_gain_useful, p_lose_useless], default=p_lose_useful)
+        nums = self.rng.uniform(low=0, high=1, size=env_vals.size)
+        mask_1d = nums > probabilities
+        
+        # enable accepted flips and replace
+        replacement_vals = np.logical_xor(skill_vals, mask_1d).astype(int)
+        self.skills[mask_2d] = replacement_vals
 
     def flip_single_entry_per_cell(self, array, p_flip=0.01, mask_additional=None):
         """Flip one randomly selected entry (uniform pdf with rng) with probability p_flip.
@@ -275,12 +273,16 @@ class Lattice:
             self.env = self.flip_single_entry_per_cell(self.env, p_flip=self.env_mutation_rate)
 
         if self.skill_mutation_rate is not None:
-            if self.skill_mutates_randomly:
+            if self.mutation_method == "random":
                 self.skills = self.flip_single_entry_per_cell(self.skills, p_flip=self.skill_mutation_rate,
                                                               mask_additional=None)
-            else:
+            elif self.mutation_method == "metropolis":
                 self.skills = self.mutate_skill_metropolis(p_flip=self.skill_mutation_rate,
                                                            mask_additional=None, scale=10)
+                
+            elif self.mutation_method == "4_rates":  # TODO: Ordering in probabilities is important - FIX
+                self.mutate_skill_diff_ratios(mutation_rate=self.skill_mutation_rate,
+                                              probabilities=(0.3, 0.1, 0.2, 0.9))  # u g, non-u g, u l, non-u l
 
         # calculate productivity to update village population
         self.prod = toolbox.calculate_productivity(self.skills, self.env,
