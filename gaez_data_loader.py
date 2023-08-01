@@ -1,6 +1,7 @@
 # Imports
 
 import numpy as np
+from scipy import ndimage
 from libtiff import TIFF
 
 
@@ -36,6 +37,15 @@ class GlobalAezV4:
             print("\n Loaded image has resolution: ", self._array.shape)
             print("\n Latitude cell size [km] for that image is: ", self._csize_km)
             print("\n Latitude cell size [deg] for that image is: ", self._csize_deg)
+
+    def resize(self, target_size=(10, 10)):
+        """ Resize matrix to target size by averaging cell values."""
+        target_n_rows, target_n_cols = target_size
+        n_rows, n_cols = self._array.shape
+        scale_row, scale_col = n_rows // target_n_rows, n_cols // target_n_cols
+
+        # Reshape and average
+        self._array = self._array.reshape(target_n_rows, scale_row, target_n_cols, scale_col).mean(axis=(1, 3))
 
     def set_woi(self, r0=0, c0=0, n_rows=100, n_cols=100):
         """ Select window of interest in row / column format.
