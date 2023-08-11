@@ -83,6 +83,37 @@ class Lattice:
         self.repopulate_empty_cells = False  # Repopulate dead villages - don't if no mutations for skill and env.
         self.metropolis_scale = 1  # scaling factor for metropolis algorithm
 
+    def load_multiple_envs(self, input_arrays, water_var=0):
+        """Load multiple GAEZ arrays into single environment. Each array has the same dimensions and a set of unique
+        values V_i. The dimension of the resulting environment has dimension (V_0 + ... + V_N) along the last axis.
+        """
+        # calculate total number of skills
+        self.num_env_vars = 0
+        for im in input_arrays:
+            variables = np.unique(im)
+            self.num_env_vars += variables.size
+
+        # assert that input arrays have identical shapes
+        r0, c0 = input_arrays[0].shape
+        assert np.all([arr.shape == (r0, c0) for arr in input_arrays])
+
+        self.env = np.zeros([r0, c0, self.num_env_vars], dtype=float)  # initialize
+
+        count = 0
+        for im in input_arrays:  # handle each input image
+            for val in np.unique(im):
+                if val == water_var:  # handle water case
+                    setter_var = 0
+                else:
+                    setter_var = 1
+
+                mask = im == val
+                self.env[mask, count] = setter_var
+                count += 1
+
+        if np.all(self.env[self.r0, self.c0, :] == water_var):
+            raise ValueError("Starting location is in water")
+
     def init_env_from_gaez(self, input_arr, water_var=0):
         """ load environment based on gaez v4 data set (33 AEZ classes, 5 arc-minute resolution)
         input data is an integer array with entries {0, 33}, where 0 is water (water_var) and 32 is built-up land.
