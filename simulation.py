@@ -171,6 +171,20 @@ class Lattice:
         raw = factor * (population - self.pop_min)
         return np.clip(raw, 0, 1)
 
+    def get_split_probs_sigmoid(self, population, factor=None):
+        """Instead of a linear probability distribution, get a sigmoid-like distribution.
+        The variable factor squishes or stretches the sigmoid"""
+        if factor is None:
+            # sigmoid looks reasonable for factor = 1 for a range (-20, 20) -> distance = 40
+            # we want to check how far off distance is from 40
+            distance = self.pop_max - self.pop_min
+            factor = 40 / distance  # yields e.g. 0.2 for distance = 200
+
+        centre_sigmoid = self.pop_min + (self.pop_max - self.pop_min) / 2
+        population -= centre_sigmoid  # center population around population mid-range
+
+        return 1 / (1 + np.exp(-population * factor))
+
     def set_search_params(self, prod_threshold=100, neigh_type="von_neumann", distance=1,
                           search_intelligently=False, max_distance_km=None):
         """ Sets the type of search environment. For now: Lattice with Moore and VN neighborhoods.
