@@ -21,6 +21,43 @@ def flip_entries(array, p_flip=0.01):
     return np.logical_xor(array, flip).astype(int)  # Convert boolean to integer
 
 
+def get_modulated_distribution(input_vals, bounds=(0, 1), base_rate=None, kind="constant"):
+    """ Get a probability distribution of kinds (constant, linear, sigmoid) using an input array input_vals.
+        For non-constant distributions, using bounds = (min, max), we ascertain p(vals < min) = 0 and p(vals > max) = 1.
+        If base_rate is not None, a probability of 0.5 is mapped to this base rate.
+    """
+    if kind is "constant":
+        assert base_rate is not None
+        return base_rate
+
+    else:
+        mn, mx = bounds
+        assert mx > mn, "Minimum must be smaller than maximum -> assignment error"
+        distance = mx - mn
+
+        if kind is "linear":  # get linear distribution
+            raw = 1 / distance * (input_vals - mn)
+            distribution = np.clip(raw, 0, 1)
+
+        elif kind is "sigmoid":  # get sigmoid distribution with auto-scaling
+            factor = 40 / distance  # yields e.g. 0.2 for distance = 200
+
+            centre_sigmoid = mn + distance / 2
+            raw = input_vals - centre_sigmoid  # center population around population mid-range
+
+            distribution = 1 / (1 + np.exp(-raw * factor))
+
+        else:
+            raise TypeError("Distribution not implemented.")
+
+        if base_rate is not None:  # add base rate
+            scale = base_rate / 0.5
+        else:
+            scale = 1
+
+        return distribution * scale
+
+
 def calculate_productivity(skill_arr, env_arr, prod_scaling=1, min_prod=0):
     """ Calculates the productivity according to prod_scale * <S_i, E_i>.
     If skill_arr and env_arr are array_like with dimension > 1, calculate dot product along the last axis.
