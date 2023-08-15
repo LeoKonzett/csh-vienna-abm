@@ -314,7 +314,7 @@ class Lattice:
                                                            mask_additional=None, scale=10)
                 
             elif self.mutation_method == "4_rates":  # TODO: Ordering in probabilities is important - use keywords
-                self.mutate_skill_diff_ratios(mutation_rate=self.skill_mutation_rate, modulation="sigmoid",
+                self.mutate_skill_diff_ratios(mutation_rate=self.skill_mutation_rate, modulation="linear",
                                               probabilities=(1., 0.01, 0.0, 0.99))  # u g, non-u g, u l, non-u l
 
             else:
