@@ -356,7 +356,7 @@ class Lattice:
         if search_empty_cells:  # villagers that move to empty locations
             idx_r, idx_c = np.nonzero(cells_that_split)
         else:  # reverse search
-            idx_r, idx_c = np.nonzero(self.is_empty & (self.prod > self.prod_threshold))
+            idx_r, idx_c = np.nonzero(self.is_empty)  # look for empty cells - productivity check in self.migrate_to
 
         if idx_r.size > 0:
             # !! the method migrate_to modifies self.is_empty. This is intended. !!
@@ -384,8 +384,8 @@ class Lattice:
                 candidates_r = candidates_r[mask]
                 candidates_c = candidates_c[mask]
 
-            # TODO: Also picks villages below the productivity threshold
             if not self.search_intelligently:  # pick village to migrate to at random
+                # TODO: Also picks villages below the productivity threshold
                 probabilities = None  # we pick one candidate regardless of empty or occupied villages
 
             else:  # use intelligent search strategy
@@ -404,14 +404,22 @@ class Lattice:
 
                     probabilities = toolbox.get_distribution(prods, mn=self.prod_threshold)
 
+                # TODO: Improve readability of this if / else statement
                 else:  # probability distribution to choose which occupied village splits
                     populations = self.population[self.num_iter, candidates_r, candidates_c]
-                    mask = populations > self.pop_min
-                    populations = populations[mask]
-                    if populations.size == 0:
+
+                    # Alternative: Calculate productivity like above and
+                    env = self.env[rr, cc]  # environment at empty cell
+                    skill = self.skills[candidates_r, candidates_c]  # skills of villages that will possibly split
+                    prods = toolbox.calculate_productivity(env, skill,
+                                                           prod_scaling=self.rate_prod, min_prod=self.prod_min)
+
+                    mask = (prods > self.prod_threshold) & (populations > self.pop_min)
+                    prods = prods[mask]
+                    if prods.size == 0:
                         continue  # continue if no villages have enough population
 
-                    probabilities = toolbox.get_distribution(populations, mn=self.pop_min)
+                    probabilities = toolbox.get_distribution(prods, mn=self.prod_threshold)
 
                 candidates_r, candidates_c = candidates_r[mask], candidates_c[mask]  # prob. and cand. have equal dims
 
