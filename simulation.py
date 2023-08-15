@@ -5,8 +5,6 @@ import logging
 import toolbox
 
 
-# TODO: General. I have too many small functions that are used only once. We only need functions if we re-use.
-
 class Lattice:
     """Base object for population dynamics in medieval Europe. Square lattice.
     Central object is a square lattice with shape (time, x, x) which keeps the track of the population in each village.
@@ -24,7 +22,7 @@ class Lattice:
         self.rng = np.random.default_rng(seed=seed)
         self.r0, self.c0 = idx_start  # location of first settlement
         self.shape = (steps_sim, n_rows, n_cols)  # only square lattice - time is 0 axis
-        self.population = np.zeros(self.shape)  # TODO: Two arrays A) Total population 1D and 2D population per step
+        self.population = np.zeros(self.shape)
         self.population[0, self.r0, self.c0] = 10  # 10 people initially
 
         # min / max population for a village to split (i.e. split with p=1 above max)
@@ -165,26 +163,6 @@ class Lattice:
         # TODO: Don't access private variables
         assert gaez_instance._nrows == self.shape[1] and gaez_instance._ncols == self.shape[2]
 
-    def get_split_probs(self, population):
-        """ Calculate the probability that each village splits. Uses uniform cdf."""
-        factor = 1 / (self.pop_max - self.pop_min)
-        raw = factor * (population - self.pop_min)
-        return np.clip(raw, 0, 1)
-
-    def get_split_probs_sigmoid(self, population, factor=None):
-        """Instead of a linear probability distribution, get a sigmoid-like distribution.
-        The variable factor squishes or stretches the sigmoid"""
-        if factor is None:
-            # sigmoid looks reasonable for factor = 1 for a range (-20, 20) -> distance = 40
-            # we want to check how far off distance is from 40
-            distance = self.pop_max - self.pop_min
-            factor = 40 / distance  # yields e.g. 0.2 for distance = 200
-
-        centre_sigmoid = self.pop_min + (self.pop_max - self.pop_min) / 2
-        population -= centre_sigmoid  # center population around population mid-range
-
-        return 1 / (1 + np.exp(-population * factor))
-
     def set_search_params(self, prod_threshold=100, neigh_type="von_neumann", distance=1,
                           search_intelligently=False, max_distance_km=None):
         """ Sets the type of search environment. For now: Lattice with Moore and VN neighborhoods.
@@ -241,10 +219,14 @@ class Lattice:
 
         return self.skills
 
-    def mutate_skill_diff_ratios(self, probabilities=None, mutation_rate=None):
+    def mutate_skill_diff_ratios(self, probabilities=None, mutation_rate=None, modulation="linear"):
         """Skill mutation happens with rate r. We identify 4 different cases:
         Gain of useful skill. Loss of useful skill. Gain of useless skill.
-        Loss of useless skill. We assign different probabilities for all 4 cases."""
+        Loss of useless skill. We assign different probabilities for all 4 cases.
+        The variable modulation determines how the mutation base rate is modulated wrt. population density.
+        Linear means that the mutation rate is proportional to the number of villagers.
+        Sigmoid means that the mutation rate is a sigmoid function of # villagers.
+        """
         if probabilities is None:  # uniform distribution
             probabilities = [0.25] * 4
         else:
@@ -254,9 +236,15 @@ class Lattice:
 
         nums = self.rng.uniform(low=0, high=1, size=self.prod.shape)
 
-        # get r/c indices of cells for which a flip happens
-        # TODO: Add condition that cell must be occupied
-        idx_r, idx_c = np.nonzero(nums < mutation_rate)
+        # this function is called *before* updating the population per step and hence uses the population from
+        # the previous iteration
+        population = self.population[self.num_iter - 1]
+        mutation_probs = toolbox.get_modulated_distribution(population, bounds=(self.pop_min, self.pop_max),
+                                                            base_rate=mutation_rate, kind=modulation)
+
+        # get r/c indices of cells for which a flip happens - cells must be occupied
+        mask = (nums < mutation_probs) & np.logical_not(self.is_empty)
+        idx_r, idx_c = np.nonzero(mask)
 
         # pick a random number for each flipped cell
         idx_flip = self.rng.choice(range(self.num_env_vars), size=idx_r.size)
@@ -326,7 +314,7 @@ class Lattice:
                                                            mask_additional=None, scale=10)
                 
             elif self.mutation_method == "4_rates":  # TODO: Ordering in probabilities is important - use keywords
-                self.mutate_skill_diff_ratios(mutation_rate=self.skill_mutation_rate,
+                self.mutate_skill_diff_ratios(mutation_rate=self.skill_mutation_rate, modulation="sigmoid",
                                               probabilities=(1., 0.01, 0.0, 0.99))  # u g, non-u g, u l, non-u l
 
             else:
@@ -336,15 +324,11 @@ class Lattice:
         self.prod = toolbox.calculate_productivity(self.skills, self.env,
                                                    prod_scaling=self.rate_prod, min_prod=self.prod_min)
 
-        # get empty cells from previous iteration
-        self.is_empty = self.population[self.num_iter - 1] == 0
-
         # update population - empty cells will stay empty regardless of productivity
         with np.errstate(divide="ignore", invalid="ignore"):
             if self.population[self.num_iter - 1, self.r0, self.c0] < 1:
                 self.population[self.num_iter - 1, self.r0, self.c0] = 1  # ensure one villager remains
 
-            # TODO: Could be optimized for memory usage but Lattice.migrate_to() takes more run-time
             self.population[self.num_iter] = self.population[self.num_iter - 1] + \
                 self.rate_growth * self.population[self.num_iter - 1] \
                 * (1 - np.divide(self.population[self.num_iter - 1], self.prod))
@@ -354,8 +338,12 @@ class Lattice:
             self.population[self.num_iter][mask] = 0
 
         # Get split probability - based on global float draw
-        prob_to_split = self.get_split_probs(self.population[self.num_iter])
+        prob_to_split = toolbox.get_modulated_distribution(self.population[self.num_iter],
+                                                           bounds=(self.pop_min, self.pop_max), kind="linear")
         floats = self.rng.uniform(low=0.0, high=1.0, size=self.prod.shape)
+
+        # Get empty cells after population update (incl. NaN and negative values that have been set to zero)
+        self.is_empty = self.population[self.num_iter] == 0
 
         # Count the number of cells that want to split and set helper variable
         num_cells_splitting = np.sum(prob_to_split > floats)
@@ -371,6 +359,7 @@ class Lattice:
             idx_r, idx_c = np.nonzero(self.is_empty & (self.prod > self.prod_threshold))
 
         if idx_r.size > 0:
+            # !! the method migrate_to modifies self.is_empty. This is intended. !!
             self.migrate_to(idx_r, idx_c, search_empty_cells=search_empty_cells)
 
     def migrate_to(self, idx_r, idx_c, search_empty_cells=True):
@@ -382,7 +371,7 @@ class Lattice:
             candidates_r = self.indices_r + rr  # get index mask
             candidates_c = self.indices_c + cc
 
-            # Check if within lattice # TODO: Get directly from memory to avoid check? Speed-up?
+            # Check if within lattice
             within_lattice = (0 <= candidates_r) & (candidates_r < self.shape[1]) & (0 <= candidates_c) & (
                     candidates_c < self.shape[2])
             candidates_r = candidates_r[within_lattice]
@@ -430,7 +419,6 @@ class Lattice:
             idx_select = self.rng.choice(range(candidates_r.size), p=probabilities)
             r0, c0 = candidates_r[idx_select], candidates_c[idx_select]
 
-            # TODO: Rewrite using temporary variable, but readability suffers
             if search_empty_cells:  # assign half of the population from (rr, cc) to (r0, c0)
                 self.population[self.num_iter, r0, c0] = self.population[self.num_iter, rr, cc] / 2
                 self.population[self.num_iter, rr, cc] -= self.population[self.num_iter, rr, cc] / 2
