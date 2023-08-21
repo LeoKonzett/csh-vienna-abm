@@ -26,7 +26,7 @@ def get_modulated_distribution(input_vals, bounds=(0, 1), base_rate=None, kind="
         For non-constant distributions, using bounds = (min, max), we ascertain p(vals < min) = 0 and p(vals > max) = 1.
         If base_rate is not None, a probability of 0.5 is mapped to this base rate.
     """
-    if kind is "constant":
+    if kind == "constant":
         assert base_rate is not None
         return base_rate
 
@@ -35,11 +35,11 @@ def get_modulated_distribution(input_vals, bounds=(0, 1), base_rate=None, kind="
         assert mx > mn, "Minimum must be smaller than maximum -> assignment error"
         distance = mx - mn
 
-        if kind is "linear":  # get linear distribution
+        if kind == "linear":  # get linear distribution
             raw = 1 / distance * (input_vals - mn)
             distribution = np.clip(raw, 0, 1)
 
-        elif kind is "sigmoid":  # get sigmoid distribution with auto-scaling
+        elif kind == "sigmoid":  # get sigmoid distribution with auto-scaling
             factor = 40 / distance  # yields e.g. 0.2 for distance = 200
 
             centre_sigmoid = mn + distance / 2
@@ -142,3 +142,34 @@ def set_neighborhood(distance=1, neigh_type="moore"):
 
     else:
         raise NotImplementedError("Valid methods names are moore and von_neumann.")
+
+
+def get_envs_from_multiple_maps(input_arrays, water_var=0):
+    """Load multiple GAEZ arrays into single environment. Each array has the same dimensions and a set of unique
+    values V_i. The dimension of the resulting environment has dimension (V_0 + ... + V_N) along the last axis.
+    """
+    # calculate total number of skills
+    num_env_vars = 0
+    for im in input_arrays:
+        variables = np.unique(im)
+        num_env_vars += variables.size
+
+    # assert that input arrays have identical shapes
+    r0, c0 = input_arrays[0].shape
+    assert np.all([arr.shape == (r0, c0) for arr in input_arrays])
+
+    env = np.zeros([r0, c0, num_env_vars], dtype=float)  # initialize
+
+    count = 0
+    for im in input_arrays:  # handle each input image
+        for val in np.unique(im):
+            if val == water_var:  # handle water case
+                setter_var = 0
+            else:
+                setter_var = 1
+
+            mask = im == val
+            env[mask, count] = setter_var
+            count += 1
+
+    return env

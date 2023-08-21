@@ -1,7 +1,6 @@
 import numpy as np
 import noise
 from tqdm import tqdm
-import logging
 import toolbox
 
 
@@ -11,151 +10,154 @@ class Lattice:
     """
     _gaez_instance = None  # instance of GlobalAezV4 in gaez_data_loader.py
 
-    def __init__(self, steps_sim=5_000, seed=50, idx_start=(0, 0), num_env_vars=10,
-                 pop_min=100, pop_max=500, rate_growth=1 / 30, prod_min=1, rate_prod=200,
-                 n_rows=10, n_cols=10, env=None):
-        """ Initializes lattice object with shape (time=steps_sim, n_rows, n_cols). assumes that env. vector
+    def __init__(self, num_iter=5_000, seed=50, idx_start=(0, 0), population_growth_rate=1 / 30,
+                 max_productivity=200, n_rows=10, n_cols=10):
+        """ Initializes lattice object with shape (num_iter, n_rows, n_cols). assumes that env. vector
         and skill vector have the same length. Also initializes environment and skill vectors to calculate productivity.
         Current data type of population array is float (integer messes up the update rule)
         """
-        # TODO: Refactor checks to improve readability
         self.rng = np.random.default_rng(seed=seed)
         self.r0, self.c0 = idx_start  # location of first settlement
-        self.shape = (steps_sim, n_rows, n_cols)  # only square lattice - time is 0 axis
+        self.shape = (num_iter, n_rows, n_cols)
+        self.n_rows, self.n_cols = n_rows, n_cols
         self.population = np.zeros(self.shape)
         self.population[0, self.r0, self.c0] = 10  # 10 people initially
 
-        # min / max population for a village to split (i.e. split with p=1 above max)
-        self.pop_min, self.pop_max = pop_min, pop_max
-
-        self.rate_growth = rate_growth  # set growth of population rate
-        self.rate_prod = rate_prod  # If this is large, small changes in the productivity are amplified
-
-        # Deal with negative population growth:
-        thresh = self.pop_max / (2 * (1 + 1 / self.rate_growth))
-        self.prod_min = prod_min
-        assert prod_min >= 0 and isinstance(prod_min, int), "Provide minimum productivity as positive integer"
-        if prod_min <= thresh:
-            print("In Lattice.init().: To avoid negative population, clip population to zero.")
-            self.clip_population_to_zero = True
-        else:
-            self.clip_population_to_zero = False
-
-        # load environment
-        if env is None:
-            self.num_env_vars = num_env_vars
-            self.env = self.init_env_perlin(scale=0.2)  # perlin env with scale 0.2 for now
-        else:
-            assert np.all(env.shape == self.shape[1:]), f"Input with shape {env.shape} doesn't match " \
-                                                        f"shape {self.shape[1:]}."
-            self.init_env_from_gaez(env)  # loads self.env
-
-        print(f"Cell productivity varies in steps {int(self.rate_prod / self.num_env_vars)}. In case of GAEZ env., "
-              f"this is also the maximum productivity.")
-        assert self.rate_prod / self.num_env_vars > self.pop_max, "With current parameters, " \
-                                                                  "village will not split. Increase either" \
-                                                                  "productivity base rate or reduce " \
-                                                                  "population required to split."
-
-        # initialize skills - assign random bin. vector with length (num_skill_vars) to starting village
-        self.num_skill_vars = self.num_env_vars
-        self.skills = np.zeros_like(self.env)
-        self.skills[self.r0, self.c0] = self.rng.integers(size=self.num_skill_vars, low=0, high=1, endpoint=True)
+        self.population_growth_rate = population_growth_rate
+        self.max_productivity = max_productivity  # maximum carrying capacity ( = productivity)
         self.prod = np.zeros((n_rows, n_cols))
-        self.prod = toolbox.calculate_productivity(self.skills, self.env,
-                                                   prod_scaling=self.rate_prod, min_prod=self.prod_min)
+        self.prod_min = 0  # minimum carrying capacity that a cell has regardless of environment
+        self.clip_population_to_zero = True  # clip negative population to zero
+
+        # Environment parameters
+        self.env = np.array([0])  # environment placeholder variable
+        self.num_env_vars = 0  # number of distinct environments (e.g. very hot, very cold, very wet, arid)
+        self.num_skill_vars = 0  # corresponding number of skills
+        self.skills = np.array([0])
+        self.productivity_step_size = None  # productivity varies from 0 to n * self.productivity_step_size
+        self.migration_thresh = None  # min. productivity for villagers to migrate
 
         self.num_iter = 1
         self.is_empty = self.population[0, :, :] == 0  # flag empty cells
+        self.repopulate_empty_cells = False
 
-        # TODO: Add reminder that these MUST be initialized or give warning if they aren't
+        # Fission parameters
+        self.pop_min, self.pop_max = None, None  # if population above pop_max -> fission with p = 1
         self.indices_r, self.indices_c = [], []  # indices to select neighbors
-        self.prod_threshold = 0  # min. productivity for villagers to migrate
-        self.search_intelligently = False  # If True, select cells probabilistically based on productivity
+        self.search_intelligently = True  # If True, select cells probabilistically based on productivity
+        self.max_distance = None  # maximum distance between two points in km
+        self.fission_distribution_type = "linear"
 
+        # Mutation parameters
         self.env_mutation_rate = None  # Probability that one entry of the environment vector per site flips
         self.skill_mutation_rate = None  # Same but for skills
         self.mutation_method = None  # True is random mutation, False is Metropolis mutation
-        self.max_distance = None  # maximum distance between two points in km
+        self.metropolis_scale = None  # scaling factor for metropolis algorithm
+        self.mutation_acceptance_probabilities = None  # acceptance probabilities for adaptive strategy
+        self.mutation_distribution_type = "linear"
 
-        self.repopulate_empty_cells = False  # Repopulate dead villages - don't if no mutations for skill and env.
-        self.metropolis_scale = 1  # scaling factor for metropolis algorithm
+        self.geo_constraints = None  # geography data that is used to modulate the carrying capacity
 
-    def load_multiple_envs(self, input_arrays, water_var=0):
-        """Load multiple GAEZ arrays into single environment. Each array has the same dimensions and a set of unique
-        values V_i. The dimension of the resulting environment has dimension (V_0 + ... + V_N) along the last axis.
+    def load_env(self, env=None, kind="random", num_env_vars=None, correlation_length=None, verbose=False):
+        """Load either a random environment (perlin noise) or a custom environment. The custom
+        environment needs to be in the correct format (i.e. matching shapes, and having entries
+        that are either 0 or 1).
+        Perlin noise yields a random environment that is spatially correlated. The correlation length
+        is controlled by a scale parameter.
+        The custom environment needs to be 3-dimensional (rows, cols, num_env_vars).
         """
-        # calculate total number of skills
-        self.num_env_vars = 0
-        for im in input_arrays:
-            variables = np.unique(im)
-            self.num_env_vars += variables.size
+        if kind == "random":  # load Perlin environment
+            assert num_env_vars is not None, "Number of mutually exclusive environment areas required."
+            assert correlation_length is not None, "Spatial correlation length required for Perlin Noise."
+            self.num_env_vars = num_env_vars
 
-        # assert that input arrays have identical shapes
-        r0, c0 = input_arrays[0].shape
-        assert np.all([arr.shape == (r0, c0) for arr in input_arrays])
+            self.env = np.zeros((self.n_rows, self.n_cols, num_env_vars))
+            for ii in range(self.n_rows):
+                for jj in range(self.n_cols):
+                    self.env[ii, jj] = [noise.pnoise3(ii * correlation_length, jj * correlation_length,
+                                                      k * correlation_length) for k in range(num_env_vars)]
 
-        self.env = np.zeros([r0, c0, self.num_env_vars], dtype=float)  # initialize
+            for ii in range(num_env_vars):  # convert to 0 or 1
+                self.env[:, :, ii] = np.where(self.env[:, :, ii] > 0, 1, 0)
 
-        count = 0
-        for im in input_arrays:  # handle each input image
-            for val in np.unique(im):
-                if val == water_var:  # handle water case
-                    setter_var = 0
-                else:
-                    setter_var = 1
+        elif kind == "custom":  # load custom environment
+            assert env is not None, "Provide environment to load"
+            assert env.shape[1:] == (self.n_rows, self.n_cols), "Number of rows / columns doesn't match"
+            self.num_env_vars = env.shape[2]
+            if verbose:
+                print(f"In meth: lattice.load_env: The environment has {self.num_env_vars} mutually exclusive types.")
 
-                mask = im == val
-                self.env[mask, count] = setter_var
-                count += 1
+            assert np.all((env == 0) | (env == 1)), "Environment needs to consist of either zeros or ones."
 
-        if np.all(self.env[self.r0, self.c0, :] == water_var):
-            raise ValueError("Starting location is in water")
+            self.env = env
+            if np.all(self.env[self.r0, self.c0, :] == 0):
+                raise ValueError("Environment at start site consists of all zeros (i.e. water). Choose different site.")
 
-    def init_env_from_gaez(self, input_arr, water_var=0):
-        """ load environment based on gaez v4 data set (33 AEZ classes, 5 arc-minute resolution)
-        input data is an integer array with entries {0, 33}, where 0 is water (water_var) and 32 is built-up land.
-        precise docs can be found at Gaez V4 user guide, page 162.
-        output data is a 3D array with exactly one non-zero entry along the last axis that denotes
-        the AEZ class to which the village belongs.
+        else:
+            raise NotImplementedError("Possible environment loaders are -custom- and -random-")
+
+        # Initialize corresponding skill array after environment is fixed
+        self.num_skill_vars = self.num_env_vars
+        self.skills = np.zeros_like(self.env)
+        self.skills[self.r0, self.c0] = self.rng.integers(size=self.num_skill_vars, low=0, high=1, endpoint=True)
+
+        # Calculate productivity step size
+        self.productivity_step_size = self.max_productivity / self.num_env_vars
+
+    def set_fission_rules(self, migration_threshold=100, include_diagonals=False, search_distance_pixels=1,
+                          search_intelligently=False, max_distance_km=None):
+        """ Sets the rules governing village fission.
+        First, set the search matrix (moore vs. von-neumann neighborhood).
+        Second, set a migration threshold. Cells with productivity below this threshold are not settled.
+        Third, set a maximum distance. This considers actual distances vs pixel distances.
+        Fourth, determine if empty cells are selected based on a uniform distribution (random) or on a non-uniform
+        distribution.
         """
-        variables = np.unique(input_arr)  # different AEZ classes
-        self.num_env_vars = variables.size
+        neigh_type = "moore" if include_diagonals else "von_neumann"
+        self.indices_r, self.indices_c = toolbox.set_neighborhood(distance=search_distance_pixels,
+                                                                  neigh_type=neigh_type)
+        self.migration_thresh = migration_threshold
+        assert self.migration_thresh > 0, "Current version requires a migration threshold larger than 0"
 
-        self.env = np.zeros([*input_arr.shape, self.num_env_vars], dtype=float)
-        for idx, val in enumerate(variables):  # start from 1 to skip water entries
-            mask = input_arr == val
-            self.env[mask, idx] = 1
+        self.search_intelligently = search_intelligently  # uniform distribution or not
 
-        # if successful, sum along last axis is unity
-        assert np.all(np.sum(self.env, axis=-1) == 1), f"sum is non-unity and is {np.sum(self.env, axis=-1)}"
+        if max_distance_km is not None:  # TODO: This should be a sub-class
+            assert self._gaez_instance is not None, "Requires instance of class gaez_data_loader"
+            self.max_distance = max_distance_km
+            print(f"Villagers have maximum search radius of {max_distance_km} kilometres.")
 
-        # handle water - can be extended to other variables
-        if water_var in variables:
-            print("In Lattice.init_env_from_gaez(): Input environment contains water. Set to zero. "
-                  "Ensure that productivity settlement threshold is above 1 to avoid settling water.")
-            is_water = input_arr == water_var
-            water_idx = np.squeeze(np.argwhere(variables == water_var))
-            self.env[is_water, water_idx] = 0
+    def set_fission_distribution(self, bounds, thresh, params_are_relative=False, kind="linear"):
+        """Updates the parameters for the fission probability distribution. Parameters are
+        - kind: linear or sigmoid - type of distribution
+        - p_min and p_max (bounds) - population thresholds above / below which p(split) is 1 / 0
+        - migration threshold (thresh) - sites below this threshold aren't settled
+        - """
+        assert bounds[1] > bounds[0], "Minimum needs to be smaller than maximum."
+        self.pop_min, self.pop_max = bounds
+        # Minimum requirements: Maximum population required to split is below step size - relevant for environments
+        # with only one non-zero entry
+        try:
+            assert self.productivity_step_size > self.pop_max, "Max. population required to split is too high."
+        except TypeError:
+            print("Run meth.: Lattice.load_env first to initialize productivity_step_size attribute.")
 
-            if is_water[self.r0, self.c0]:  # starting location in water
-                raise Exception("Staring point is in water. Choose different point.")
+        assert thresh > 0, "Migration threshold needs to be larger than zero."
+        self.migration_thresh = thresh
+        assert kind in ["linear", "sigmoid"], "Valid distribution types are sigmoid and linear."
+        self.fission_distribution_type = kind
 
-    def init_env_perlin(self, scale=0.1):
-        """Create an environment of shape (size, size, num_entries) with Perlin noise.
-        This yields spatially correlated noise. scale gives the correlation length"""
-        # Populate environment with spatially correlated variables
-        env_perlin = np.zeros((*self.shape[1:], self.num_env_vars))
-        for ii in range(self.shape[1]):  # rows
-            for jj in range(self.shape[2]):  # columns
-                env_perlin[ii, jj] = [noise.pnoise3(ii * scale, jj * scale, k * scale) for k in
-                                      range(self.num_env_vars)]
+        if params_are_relative:  # choose parameters based on productivity step size
+            self.pop_min *= np.floor(self.productivity_step_size)
+            self.pop_max *= np.floor(self.productivity_step_size)
+            self.migration_thresh *= np.floor(self.productivity_step_size)
 
-        # Binarize the array
-        for ii in range(self.num_env_vars):
-            env_perlin[:, :, ii] = np.where(env_perlin[:, :, ii] > 0, 1, 0)
-
-        return env_perlin
+    def load_geo_constraints(self, arr_constraints):
+        """ Load an array to modulate the carrying capacity (productivity).
+        The array must contain values between 0 and 1, where 1 denotes a maximum modulation
+        and 0 denotes no modulation. """
+        assert np.all(arr_constraints.shape == (self.shape[1], self.shape[2])), "Shapes don't match"
+        assert np.all((0 <= arr_constraints) & (arr_constraints <= 1)), "Provide an array with values between 0 and 1"
+        self.geo_constraints = arr_constraints
 
     def load_gaez_instance(self, gaez_instance):
         """load an instance of Global_AEZ data. Is pass-by-reference"""
@@ -163,37 +165,30 @@ class Lattice:
         # TODO: Don't access private variables
         assert gaez_instance._nrows == self.shape[1] and gaez_instance._ncols == self.shape[2]
 
-    def set_search_params(self, prod_threshold=100, neigh_type="von_neumann", distance=1,
-                          search_intelligently=False, max_distance_km=None):
-        """ Sets the type of search environment. For now: Lattice with Moore and VN neighborhoods.
-        If the productivity of the selected cell is below prod_threshold, the cell doesn't split.
-        distance attribute sets the size of the neighborhoods (e.g. distance 1 for Moore is 3x3)
+    def set_mutation_rules(self, env_mutation_rate=None, skill_mutation_rate=None, mutation_method="adaptive",
+                           metropolis_scale=1, acceptance_probabilities=(1, 0.01, 0, 0.99),
+                           distribution_type="linear"):
+        """Sets / updates parameters for mutation such as environment / skill mutation rate. Other parameters are
+        - scaling ratio for metropolis mutation strategy
+        - acceptance probabilities for the adaptive mutation strategy
+        - rate modulation for the adaptive mutation strategy - distribution_type
         """
-        self.indices_r, self.indices_c = toolbox.set_neighborhood(distance=distance, neigh_type=neigh_type)
-        self.prod_threshold = prod_threshold
-        assert self.prod_threshold > 0, "Current version requires a settlement threshold > 0"
-        self.search_intelligently = search_intelligently
-        if max_distance_km is not None:
-            self.max_distance = max_distance_km
-            print(f"Villagers have maximum search radius of {max_distance_km} kilometres.")
-
-    def set_evolution_params(self, env_mutation_rate=None, skill_mutation_rate=None, mutation_method="metropolis",
-                             metropolis_scale=1, repopulate_empty_cells=False):
-        """Sets / updates parameters for evolution, e.g. environment / skill mutation rate or prod. scaling factor.
-        For now, only updates the mutation rates."""
         self.env_mutation_rate = env_mutation_rate  # environment mutation rate
         self.skill_mutation_rate = skill_mutation_rate  # skill mutation rate
-        self.mutation_method = mutation_method  # mutate directionally (metropolis) or random
+
+        assert mutation_method in ["random, metropolis, adaptive"], "Valid methods are random, metropolis, and adaptive"
+        self.mutation_method = mutation_method
+
         self.metropolis_scale = metropolis_scale  # scaling ratio for Metropolis
-        self.repopulate_empty_cells = repopulate_empty_cells  # repopulate dead villages
+        assert len(acceptance_probabilities) == 4
+        assert acceptance_probabilities[0] > acceptance_probabilities[1]  # useful gain > non-useful gain
+        assert acceptance_probabilities[2] < acceptance_probabilities[3]  # loss of u. skill < loss of non-useful skill
+        self.mutation_acceptance_probabilities = (1., 0.01, 0.0, 0.99)  # u g, non-u g, u l, non-u l
+        assert distribution_type in ["linear, sigmoid"]
+        self.mutation_distribution_type = distribution_type
 
-        # Checks
-        if env_mutation_rate is None and skill_mutation_rate is None and self.repopulate_empty_cells:
-            logging.warning("If neither the environment nor the skill mutates, it is "
-                            "strongly advised to set repopulate_empty_cells to False to speed up the code.")
-
-        if self.clip_population_to_zero and not self.repopulate_empty_cells:
-            logging.warning("Villages can die (zero population) but cannot be re-populated.")
+        if self.env_mutation_rate is not None and self.skill_mutation_rate is not None:
+            self.repopulate_empty_cells = True  # re-populate formerly dead village if any mutation is present
 
     def mutate_skill_metropolis(self, p_flip, mask_additional=None, scale=1):
         """Metropolis-like mutation for skills. Compares the ratio alpha = Prod(flip) / prod_previous and accepts
@@ -201,11 +196,11 @@ class Lattice:
         If scale != 1, the ratio array gets exponentiated by scale, e.g. ratio -> ratio ** scale
         This exacerbates larger differences, e.g. 0.75 -> 0.56 (scale = 2) -> 0.42
         """
-        prod_previous = toolbox.calculate_productivity(self.skills, self.env, prod_scaling=self.rate_prod,
+        prod_previous = toolbox.calculate_productivity(self.skills, self.env, prod_scaling=self.max_productivity,
                                                        min_prod=self.prod_min)
 
         skills_update = self.flip_single_entry_per_cell(self.skills, p_flip=p_flip, mask_additional=mask_additional)
-        prod_update = toolbox.calculate_productivity(skills_update, self.env, prod_scaling=self.rate_prod,
+        prod_update = toolbox.calculate_productivity(skills_update, self.env, prod_scaling=self.max_productivity,
                                                      min_prod=self.prod_min)
         with np.errstate(divide="ignore", invalid="ignore"):  # ignore division by zero warning
             ratio = np.divide(prod_update, prod_previous)
@@ -313,16 +308,20 @@ class Lattice:
                 self.skills = self.mutate_skill_metropolis(p_flip=self.skill_mutation_rate,
                                                            mask_additional=None, scale=10)
                 
-            elif self.mutation_method == "4_rates":  # TODO: Ordering in probabilities is important - use keywords
-                self.mutate_skill_diff_ratios(mutation_rate=self.skill_mutation_rate, modulation="linear",
-                                              probabilities=(1., 0.01, 0.0, 0.99))  # u g, non-u g, u l, non-u l
-
+            elif self.mutation_method == "adaptive":
+                self.mutate_skill_diff_ratios(mutation_rate=self.skill_mutation_rate,
+                                              modulation=self.mutation_distribution_type,
+                                              probabilities=self.mutation_acceptance_probabilities)
             else:
                 raise Exception("Mutation method not implemented. Valid methods are random, metropolis, and 4_rates.")
 
         # calculate productivity to update village population
         self.prod = toolbox.calculate_productivity(self.skills, self.env,
-                                                   prod_scaling=self.rate_prod, min_prod=self.prod_min)
+                                                   prod_scaling=self.max_productivity, min_prod=self.prod_min)
+
+        # modulate productivity according to geographic constraints
+        if self.geo_constraints is not None:
+            self.prod = self.prod * (1 - self.geo_constraints)
 
         # update population - empty cells will stay empty regardless of productivity
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -330,7 +329,7 @@ class Lattice:
                 self.population[self.num_iter - 1, self.r0, self.c0] = 1  # ensure one villager remains
 
             self.population[self.num_iter] = self.population[self.num_iter - 1] + \
-                self.rate_growth * self.population[self.num_iter - 1] \
+                self.population_growth_rate * self.population[self.num_iter - 1] \
                 * (1 - np.divide(self.population[self.num_iter - 1], self.prod))
 
         if self.clip_population_to_zero:  # set NaN or negative populations to zero
@@ -394,15 +393,15 @@ class Lattice:
                     env = self.env[candidates_r, candidates_c]
                     skill = self.skills[rr, cc]
                     prods = toolbox.calculate_productivity(skill, env,
-                                                           prod_scaling=self.rate_prod, min_prod=self.prod_min)
+                                                           prod_scaling=self.max_productivity, min_prod=self.prod_min)
 
                     # Check if productivity of neighboring cells is above thresh and if cells are empty
-                    mask = (prods > self.prod_threshold) & self.is_empty[candidates_r, candidates_c]
+                    mask = (prods >= self.migration_thresh) & self.is_empty[candidates_r, candidates_c]
                     prods = prods[mask]
                     if prods.size == 0:
                         continue  # continue if no valid neighbors
 
-                    probabilities = toolbox.get_distribution(prods, mn=self.prod_threshold)
+                    probabilities = toolbox.get_distribution(prods, mn=self.migration_thresh)
 
                 # TODO: Improve readability of this if / else statement
                 else:  # probability distribution to choose which occupied village splits
@@ -412,14 +411,14 @@ class Lattice:
                     env = self.env[rr, cc]  # environment at empty cell
                     skill = self.skills[candidates_r, candidates_c]  # skills of villages that will possibly split
                     prods = toolbox.calculate_productivity(env, skill,
-                                                           prod_scaling=self.rate_prod, min_prod=self.prod_min)
+                                                           prod_scaling=self.max_productivity, min_prod=self.prod_min)
 
-                    mask = (prods > self.prod_threshold) & (populations > self.pop_min)
+                    mask = (prods >= self.migration_thresh) & (populations > self.pop_min)
                     prods = prods[mask]
                     if prods.size == 0:
                         continue  # continue if no villages have enough population
 
-                    probabilities = toolbox.get_distribution(prods, mn=self.prod_threshold)
+                    probabilities = toolbox.get_distribution(prods, mn=self.migration_thresh)
 
                 candidates_r, candidates_c = candidates_r[mask], candidates_c[mask]  # prob. and cand. have equal dims
 

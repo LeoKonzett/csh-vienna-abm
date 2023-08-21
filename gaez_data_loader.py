@@ -104,3 +104,31 @@ class GlobalAezV4:
         distances = self._distance_array[c_deltas, r0, p_targets_r]  # c0 gets broadcast to match the array shapes
 
         return distances
+
+    def get_env(self, water_var=0):
+        """ get environment based on gaez v4 data set (33 AEZ classes, 5 arc-minute resolution)
+        input data is an integer array with entries {0, 33}, where 0 is water (water_var) and e.g. 32 is built-up land.
+        precise docs can be found at Gaez V4 user guide, page 162.
+        output data is a 3D array with exactly one non-zero entry along the last axis that denotes
+        the AEZ class to which the village belongs.
+        """
+        input_arr = self._array
+        variables = np.unique(input_arr)  # different AEZ classes
+        num_env_vars = variables.size
+
+        env = np.zeros([*input_arr.shape, num_env_vars], dtype=float)
+        for idx, val in enumerate(variables):  # start from 1 to skip water entries
+            mask = input_arr == val
+            env[mask, idx] = 1
+
+        # if successful, sum along last axis is unity
+        assert np.all(np.sum(env, axis=-1) == 1), f"sum is non-unity and is {np.sum(env, axis=-1)}"
+
+        # handle water - can be extended to other variables
+        if water_var in variables:
+            print("In Lattice.init_env_from_gaez(): Input environment contains water. Set to zero.")
+            is_water = input_arr == water_var
+            water_idx = np.squeeze(np.argwhere(variables == water_var))
+            env[is_water, water_idx] = 0
+
+        return env
