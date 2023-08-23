@@ -39,7 +39,7 @@ class Lattice:
 
         self.num_iter = 1
         self.is_empty = self.population[0, :, :] == 0  # flag empty cells
-        self.repopulate_empty_cells = False
+        self.is_uninhabitable = np.array([False])  # set in method self.load_env
 
         # Fission parameters
         self.pop_min, self.pop_max = None, None  # if population above pop_max -> fission with p = 1
@@ -103,6 +103,9 @@ class Lattice:
 
         # Calculate productivity step size
         self.productivity_step_size = self.max_productivity / self.num_env_vars
+
+        # Set uninhabitable cells - sites where environment vector is all zero can never be populated
+        self.is_uninhabitable = np.all(self.env == 0, axis=-1)
 
     def set_fission_rules(self, migration_threshold=100, include_diagonals=False, search_distance_pixels=1,
                           search_intelligently=False, max_distance_km=None):
@@ -186,9 +189,6 @@ class Lattice:
         self.mutation_acceptance_probabilities = (1., 0.01, 0.0, 0.99)  # u g, non-u g, u l, non-u l
         assert distribution_type in ["linear, sigmoid"]
         self.mutation_distribution_type = distribution_type
-
-        if self.env_mutation_rate is not None and self.skill_mutation_rate is not None:
-            self.repopulate_empty_cells = True  # re-populate formerly dead village if any mutation is present
 
     def mutate_skill_metropolis(self, p_flip, mask_additional=None, scale=1):
         """Metropolis-like mutation for skills. Compares the ratio alpha = Prod(flip) / prod_previous and accepts
@@ -299,6 +299,7 @@ class Lattice:
         # run mutations
         if self.env_mutation_rate is not None:
             self.env = self.flip_single_entry_per_cell(self.env, p_flip=self.env_mutation_rate)
+            self.is_uninhabitable = np.all(self.env == 0, axis=-1)  # update un-inhabitable cells upon env mutation
 
         if self.skill_mutation_rate is not None:
             if self.mutation_method == "random":
@@ -355,7 +356,7 @@ class Lattice:
         if search_empty_cells:  # villagers that move to empty locations
             idx_r, idx_c = np.nonzero(cells_that_split)
         else:  # reverse search
-            idx_r, idx_c = np.nonzero(self.is_empty)  # look for empty cells - productivity check in self.migrate_to
+            idx_r, idx_c = np.nonzero(self.is_empty & (~self.is_uninhabitable))  # look for empty and habitable cells
 
         if idx_r.size > 0:
             # !! the method migrate_to modifies self.is_empty. This is intended. !!
@@ -383,44 +384,44 @@ class Lattice:
                 candidates_r = candidates_r[mask]
                 candidates_c = candidates_c[mask]
 
-            if not self.search_intelligently:  # pick village to migrate to at random
-                # TODO: Also picks villages below the productivity threshold
-                probabilities = None  # we pick one candidate regardless of empty or occupied villages
+            if search_empty_cells:  # probability distribution for empty villages based on productivity
+                env = self.env[candidates_r, candidates_c]
+                skill = self.skills[rr, cc]
+                prods = toolbox.calculate_productivity(skill, env,
+                                                       prod_scaling=self.max_productivity, min_prod=self.prod_min)
 
-            else:  # use intelligent search strategy
-                if search_empty_cells:  # probability distribution for empty villages based on productivity
+                # Check if productivity of neighboring cells is above thresh and if cells are empty
+                mask = (prods >= self.migration_thresh) & self.is_empty[candidates_r, candidates_c]
+                prods = prods[mask]
+                if prods.size == 0:
+                    continue  # continue if no valid neighbors
 
-                    env = self.env[candidates_r, candidates_c]
-                    skill = self.skills[rr, cc]
-                    prods = toolbox.calculate_productivity(skill, env,
-                                                           prod_scaling=self.max_productivity, min_prod=self.prod_min)
-
-                    # Check if productivity of neighboring cells is above thresh and if cells are empty
-                    mask = (prods >= self.migration_thresh) & self.is_empty[candidates_r, candidates_c]
-                    prods = prods[mask]
-                    if prods.size == 0:
-                        continue  # continue if no valid neighbors
-
+                if self.search_intelligently:
                     probabilities = toolbox.get_distribution(prods, mn=self.migration_thresh)
+                else:
+                    probabilities = None
 
-                # TODO: Improve readability of this if / else statement
-                else:  # probability distribution to choose which occupied village splits
-                    populations = self.population[self.num_iter, candidates_r, candidates_c]
+            # TODO: Improve readability of this if / else statement
+            else:  # probability distribution to choose which occupied village splits
+                populations = self.population[self.num_iter, candidates_r, candidates_c]
 
-                    # Alternative: Calculate productivity like above and
-                    env = self.env[rr, cc]  # environment at empty cell
-                    skill = self.skills[candidates_r, candidates_c]  # skills of villages that will possibly split
-                    prods = toolbox.calculate_productivity(env, skill,
-                                                           prod_scaling=self.max_productivity, min_prod=self.prod_min)
+                # Alternative: Calculate productivity like above and
+                env = self.env[rr, cc]  # environment at empty cell
+                skill = self.skills[candidates_r, candidates_c]  # skills of villages that will possibly split
+                prods = toolbox.calculate_productivity(env, skill,
+                                                       prod_scaling=self.max_productivity, min_prod=self.prod_min)
 
-                    mask = (prods >= self.migration_thresh) & (populations > self.pop_min)
-                    prods = prods[mask]
-                    if prods.size == 0:
-                        continue  # continue if no villages have enough population
+                mask = (prods >= self.migration_thresh) & (populations > self.pop_min)
+                prods = prods[mask]
+                if prods.size == 0:
+                    continue  # continue if no villages have enough population
 
+                if self.search_intelligently:
                     probabilities = toolbox.get_distribution(prods, mn=self.migration_thresh)
+                else:
+                    probabilities = None
 
-                candidates_r, candidates_c = candidates_r[mask], candidates_c[mask]  # prob. and cand. have equal dims
+            candidates_r, candidates_c = candidates_r[mask], candidates_c[mask]  # prob. and cand. have equal dims
 
             # distribution is either None (uniform) or some nd-array - select accordingly
             idx_select = self.rng.choice(range(candidates_r.size), p=probabilities)
