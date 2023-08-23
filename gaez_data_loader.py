@@ -1,7 +1,6 @@
 # Imports
 
 import numpy as np
-from scipy import ndimage
 from libtiff import TIFF
 
 
