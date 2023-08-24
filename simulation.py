@@ -50,13 +50,18 @@ class Lattice:
         self.fission_distribution_type = "linear"
 
         # Mutation parameters
-        self.min_pop_mutation, self.max_pop_mutation = None, None  # if population above min_pop -> flip with p > 0
         self.env_mutation_rate = None  # Probability that one entry of the environment vector per site flips
         self.skill_mutation_rate = None  # Same but for skills
-        self.mutation_method = None  # True is random mutation, False is Metropolis mutation
+        self.mutation_method = None
+
+        # Params for Metropolis mutation
         self.metropolis_scale = None  # scaling factor for metropolis algorithm
-        self.mutation_acceptance_probabilities = None  # acceptance probabilities for adaptive strategy
-        self.mutation_distribution_type = "linear"
+
+        # Params for adaptive mutation
+        self.min_pop_mutation, self.max_pop_mutation = None, None
+        self.p_gain_u, self.p_gain_nu = None, None
+        self.p_lose_u, self.p_lose_nu = None, None
+        self.mutation_distribution_type = "constant"
 
         self.geo_constraints = None  # geography data that is used to modulate the carrying capacity
 
@@ -128,7 +133,7 @@ class Lattice:
                                                                   neigh_type=neigh_type)
 
         if migration_threshold is not None:
-            assert self.migration_thresh > 0, "Current version requires a migration threshold larger than 0"
+            assert migration_threshold > 0, "Current version requires a migration threshold larger than 0"
             self.migration_thresh = migration_threshold
         else:  # migrate if at least one skill matches
             self.migration_thresh = np.floor(self.productivity_step_size)
@@ -142,12 +147,9 @@ class Lattice:
 
         assert bounds[1] > bounds[0], "Minimum needs to be smaller than maximum."
         self.pop_min, self.pop_max = bounds
-        # Minimum requirements: Maximum population required to split is below step size - relevant for environments
-        # with only one non-zero entry
-        try:
-            assert self.productivity_step_size > self.pop_max, "Max. population required to split is too high."
-        except TypeError:
-            print("Run meth.: Lattice.load_env first to initialize productivity_step_size attribute.")
+
+        if (self.productivity_step_size * self.num_env_vars) < self.pop_max:
+            raise ValueError("Currently, fully grown cells do not split with p=1.")
 
         assert dist_type in ["linear", "sigmoid"], "Valid distribution types are sigmoid and linear."
         self.fission_distribution_type = dist_type
@@ -171,19 +173,19 @@ class Lattice:
         # TODO: Don't access private variables
         assert gaez_instance._nrows == self.shape[1] and gaez_instance._ncols == self.shape[2]
 
-    def set_mutation_rules(self, bounds, env_mutation_rate=None, skill_mutation_rate=None,
-                           skill_mutation_method="adaptive", metropolis_scale=1, bounds_are_relative=False,
-                           acceptance_probabilities=(1, 0.01, 0, 0.99), distribution_type="linear"):
+    def set_mutation_rules(self, env_mutation_rate=None, skill_mutation_rate=None,
+                           skill_mutation_method="adaptive", metropolis_scale=None,
+                           params_adaptive=None):
         """Sets / updates parameters for mutation such as environment / skill mutation rate. Other parameters are
         - scaling ratio for metropolis mutation strategy
         - acceptance probabilities for the adaptive mutation strategy
         - rate modulation for the adaptive mutation strategy - distribution_type
         """
-        assert bounds[1] > bounds[0], "Minimum needs to larger than maximum."
-        if bounds[0] < self.starting_pop and distribution_type != "linear":
-            raise RuntimeWarning("At t = 0, the initial village has zero probability to mutate a skill")
-
-        self.min_pop_mutation, self.max_pop_mutation = bounds
+        assert skill_mutation_method in ["random", "metropolis", "adaptive"], \
+            "Valid methods are random, metropolis, and adaptive"
+        self.mutation_method = skill_mutation_method
+        # Note: In the current implementation, only the adaptive mutation method can use a non-uniform distribution
+        # TODO: Fix
 
         if env_mutation_rate is not None:
             assert 0 <= env_mutation_rate <= 1, "Rate is probability and should be between 0 and 1"
@@ -192,18 +194,36 @@ class Lattice:
         self.env_mutation_rate = env_mutation_rate
         self.skill_mutation_rate = skill_mutation_rate
 
-        assert skill_mutation_method in ["random", "metropolis", "adaptive"], \
-            "Valid methods are random, metropolis, and adaptive"
-        self.mutation_method = skill_mutation_method
+        if skill_mutation_method == "adaptive":
+            # Check keys
+            assert params_adaptive is not None, "Provide a dictionary with parameters"
+            keys_required = {"p_gain_useful", "p_gain_useless", "p_lose_useful",
+                             "p_lose_useless", "dist_type", "n_min", "n_max"}
+            keys_optional = keys_required | {"bounds_are_relative"}
+            if not keys_required <= params_adaptive.keys() <= keys_optional:
+                raise ValueError(f"Include all required keys: {keys_required} and do not include "
+                                 f"keys that are not optional: {keys_optional}")
 
-        # TODO: Update how acceptance probabilities are handled - current version with tuple is inflexible
-        self.metropolis_scale = metropolis_scale  # scaling ratio for Metropolis
-        assert len(acceptance_probabilities) == 4
-        assert acceptance_probabilities[0] > acceptance_probabilities[1]  # useful gain > non-useful gain
-        assert acceptance_probabilities[2] < acceptance_probabilities[3]  # loss of u. skill < loss of non-useful skill
-        self.mutation_acceptance_probabilities = (1., 0.01, 0.0, 0.99)  # u g, non-u g, u l, non-u l
-        assert distribution_type in ["linear", "sigmoid"]
-        self.mutation_distribution_type = distribution_type
+            # Set variables
+            assert params_adaptive.get("dist_type") in ["constant", "linear", "sigmoid"]
+            self.mutation_distribution_type = params_adaptive["dist_type"]
+            self.p_gain_u, self.p_gain_nu = params_adaptive["p_gain_useful"], params_adaptive["p_gain_useless"]
+            self.p_lose_u, self.p_lose_nu = params_adaptive["p_lose_useful"], params_adaptive["p_lose_useless"]
+
+            # Check bounds
+            if params_adaptive["dist_type"] != "constant":
+                self.min_pop_mutation, self.max_pop_mutation = params_adaptive["n_min"], params_adaptive["n_max"]
+                assert self.min_pop_mutation < self.max_pop_mutation, "Minimum needs to larger than maximum."
+                if self.min_pop_mutation < self.starting_pop:
+                    raise RuntimeWarning("At t = 0, the initial village has zero probability to mutate a skill")
+
+                if params_adaptive["bounds_are_relative"]:
+                    self.min_pop_mutation *= np.floor(self.productivity_step_size)
+                    self.max_pop_mutation *= np.floor(self.productivity_step_size)
+
+        if skill_mutation_method == "metropolis":
+            assert metropolis_scale is not None
+            self.metropolis_scale = metropolis_scale  # scaling ratio for Metropolis
 
     def mutate_skill_metropolis(self, p_flip, mask_additional=None, scale=1):
         """Metropolis-like mutation for skills. Compares the ratio alpha = Prod(flip) / prod_previous and accepts
@@ -229,21 +249,14 @@ class Lattice:
 
         return self.skills
 
-    def mutate_skill_diff_ratios(self, probabilities=None, mutation_rate=None, modulation="linear"):
-        """Skill mutation happens with rate r. We identify 4 different cases:
+    def mutate_skill_diff_ratios(self):
+        """Skill mutation for adaptive scenario. We identify 4 different cases:
         Gain of useful skill. Loss of useful skill. Gain of useless skill.
         Loss of useless skill. We assign different probabilities for all 4 cases.
         The variable modulation determines how the mutation base rate is modulated wrt. population density.
         Linear means that the mutation rate is proportional to the number of villagers.
         Sigmoid means that the mutation rate is a sigmoid function of # villagers.
         """
-        if probabilities is None:  # uniform distribution
-            probabilities = [0.25] * 4
-        else:
-            assert len(probabilities) == 4, "Provide 4 probability values."
-
-        p_gain_useful, p_gain_useless, p_lose_useful, p_lose_useless = probabilities
-
         nums = self.rng.uniform(low=0, high=1, size=self.prod.shape)
 
         # this function is called *before* updating the population per step and hence uses the population from
@@ -251,7 +264,8 @@ class Lattice:
         population = self.population[self.num_iter - 1]
         mutation_probs = toolbox.get_modulated_distribution(population,
                                                             bounds=(self.min_pop_mutation, self.max_pop_mutation),
-                                                            base_rate=mutation_rate, kind=modulation)
+                                                            base_rate=self.skill_mutation_rate,
+                                                            kind=self.mutation_distribution_type)
 
         # get r/c indices of cells for which a flip happens - cells must be occupied
         mask = (nums < mutation_probs) & np.logical_not(self.is_empty)
@@ -269,7 +283,8 @@ class Lattice:
         m2 = (skill_vals == 0) & (env_vals == 1)  # gain skill that is used
         m3 = (skill_vals == 1) & (env_vals == 0)  # lose skill that isn't used
 
-        probabilities = np.select([m1, m2, m3], [p_gain_useless, p_gain_useful, p_lose_useless], default=p_lose_useful)
+        probabilities = np.select([m1, m2, m3], [self.p_gain_nu, self.p_gain_u, self.p_lose_nu],
+                                  default=self.p_lose_u)
         nums = self.rng.uniform(low=0, high=1, size=env_vals.size)
         mask_1d = nums < probabilities
         
@@ -327,9 +342,7 @@ class Lattice:
                                                            mask_additional=is_occupied, scale=self.metropolis_scale)
                 
             elif self.mutation_method == "adaptive":
-                self.mutate_skill_diff_ratios(mutation_rate=self.skill_mutation_rate,
-                                              modulation=self.mutation_distribution_type,
-                                              probabilities=self.mutation_acceptance_probabilities)
+                self.mutate_skill_diff_ratios()
             else:
                 raise Exception("Mutation method not implemented. Valid methods are random, metropolis, and 4_rates.")
 
@@ -389,7 +402,14 @@ class Lattice:
 
     def migrate_to(self, idx_r, idx_c, search_empty_cells=True):
         """ This is the core loop that is intended for NUMBA to vastly speed up the FOR loop.
-        Loops through occupied cells, selects a migration location for each cell based on a prob. distribution."""
+        Loops through occupied cells, selects a migration location for each cell based on a prob. distribution.
+        Reverse search works as follows:
+        1 - get populations from all sites a distance d away from the empty site
+        2 - calculate carrying capacity (productivity) using env from empty site and skills at occupied sites
+        3 - calculate fission distribution for all sites from step 1
+        4 - take sites for which fission is True and which are above the migration threshold
+        5 - get distribution based on carrying capacities to select site with the best skill / env match
+        """
 
         # Loop through non-zero cells
         for rr, cc in zip(idx_r, idx_c):
@@ -409,7 +429,7 @@ class Lattice:
                 candidates_r = candidates_r[mask]
                 candidates_c = candidates_c[mask]
 
-            if search_empty_cells:  # probability distribution for empty villages based on productivity
+            if search_empty_cells:
                 env = self.env[candidates_r, candidates_c]
                 skill = self.skills[rr, cc]
                 prods = toolbox.calculate_productivity(skill, env,
@@ -436,9 +456,14 @@ class Lattice:
                 prods = toolbox.calculate_productivity(env, skill,
                                                        prod_scaling=self.max_productivity, min_prod=self.prod_min)
 
-                # Here, we assume that fission happens if villagers have populations above the threshold
-                # instead of providing a fission distribution TODO: Include proper fission distribution
-                mask = (prods >= self.migration_thresh) & (populations > self.pop_min)
+                # Select cells that actually fission, and that have enough skill / env overlap
+                prob_to_split = toolbox.get_modulated_distribution(populations,
+                                                                   bounds=(self.pop_min, self.pop_max),
+                                                                   kind=self.fission_distribution_type)
+                floats = self.rng.uniform(low=0.0, high=1.0, size=prob_to_split.shape)
+                cells_that_split = prob_to_split > floats
+                mask = (prods >= self.migration_thresh) & cells_that_split
+
                 prods = prods[mask]
                 if prods.size == 0:
                     continue  # continue if no villages have enough population
