@@ -11,7 +11,7 @@ class Lattice:
     _gaez_instance = None  # instance of GlobalAezV4 in gaez_data_loader.py
 
     def __init__(self, num_iter=5_000, seed=50, idx_start=(0, 0), population_growth_rate=1 / 30,
-                 max_productivity=200, n_rows=10, n_cols=10):
+                 max_productivity=200, n_rows=10, n_cols=10, starting_pop=10):
         """ Initializes lattice object with shape (num_iter, n_rows, n_cols). assumes that env. vector
         and skill vector have the same length. Also initializes environment and skill vectors to calculate productivity.
         Current data type of population array is float (integer messes up the update rule)
@@ -21,7 +21,8 @@ class Lattice:
         self.shape = (num_iter, n_rows, n_cols)
         self.n_rows, self.n_cols = n_rows, n_cols
         self.population = np.zeros(self.shape)
-        self.population[0, self.r0, self.c0] = 10  # 10 people initially
+        self.starting_pop = starting_pop
+        self.population[0, self.r0, self.c0] = starting_pop
 
         self.population_growth_rate = population_growth_rate
         self.max_productivity = max_productivity  # maximum carrying capacity ( = productivity)
@@ -49,6 +50,7 @@ class Lattice:
         self.fission_distribution_type = "linear"
 
         # Mutation parameters
+        self.min_pop_mutation, self.max_pop_mutation = None, None  # if population above min_pop -> flip with p > 0
         self.env_mutation_rate = None  # Probability that one entry of the environment vector per site flips
         self.skill_mutation_rate = None  # Same but for skills
         self.mutation_method = None  # True is random mutation, False is Metropolis mutation
@@ -82,7 +84,7 @@ class Lattice:
 
         elif kind == "custom":  # load custom environment
             assert env is not None, "Provide environment to load"
-            assert env.shape[1:] == (self.n_rows, self.n_cols), "Number of rows / columns doesn't match"
+            assert env.shape[:2] == (self.n_rows, self.n_cols), "Number of rows / columns doesn't match"
             self.num_env_vars = env.shape[2]
             if verbose:
                 print(f"In meth: lattice.load_env: The environment has {self.num_env_vars} mutually exclusive types.")
@@ -168,26 +170,33 @@ class Lattice:
         # TODO: Don't access private variables
         assert gaez_instance._nrows == self.shape[1] and gaez_instance._ncols == self.shape[2]
 
-    def set_mutation_rules(self, env_mutation_rate=None, skill_mutation_rate=None, mutation_method="adaptive",
-                           metropolis_scale=1, acceptance_probabilities=(1, 0.01, 0, 0.99),
-                           distribution_type="linear"):
+    def set_mutation_rules(self, bounds, env_mutation_rate=None, skill_mutation_rate=None,
+                           skill_mutation_method="adaptive", metropolis_scale=1,
+                           acceptance_probabilities=(1, 0.01, 0, 0.99), distribution_type="linear"):
         """Sets / updates parameters for mutation such as environment / skill mutation rate. Other parameters are
         - scaling ratio for metropolis mutation strategy
         - acceptance probabilities for the adaptive mutation strategy
         - rate modulation for the adaptive mutation strategy - distribution_type
         """
+        assert bounds[1] > bounds[0], "Minimum needs to larger than maximum."
+        if bounds[0] < self.starting_pop and distribution_type != "linear":
+            raise RuntimeWarning("At t = 0, the initial village has zero probability to mutate a skill")
+
+        self.min_pop_mutation, self.max_pop_mutation = bounds
+
         self.env_mutation_rate = env_mutation_rate  # environment mutation rate
         self.skill_mutation_rate = skill_mutation_rate  # skill mutation rate
 
-        assert mutation_method in ["random, metropolis, adaptive"], "Valid methods are random, metropolis, and adaptive"
-        self.mutation_method = mutation_method
+        assert skill_mutation_method in ["random", "metropolis", "adaptive"], \
+            "Valid methods are random, metropolis, and adaptive"
+        self.mutation_method = skill_mutation_method
 
         self.metropolis_scale = metropolis_scale  # scaling ratio for Metropolis
         assert len(acceptance_probabilities) == 4
         assert acceptance_probabilities[0] > acceptance_probabilities[1]  # useful gain > non-useful gain
         assert acceptance_probabilities[2] < acceptance_probabilities[3]  # loss of u. skill < loss of non-useful skill
         self.mutation_acceptance_probabilities = (1., 0.01, 0.0, 0.99)  # u g, non-u g, u l, non-u l
-        assert distribution_type in ["linear, sigmoid"]
+        assert distribution_type in ["linear", "sigmoid"]
         self.mutation_distribution_type = distribution_type
 
     def mutate_skill_metropolis(self, p_flip, mask_additional=None, scale=1):
@@ -234,7 +243,8 @@ class Lattice:
         # this function is called *before* updating the population per step and hence uses the population from
         # the previous iteration
         population = self.population[self.num_iter - 1]
-        mutation_probs = toolbox.get_modulated_distribution(population, bounds=(self.pop_min, self.pop_max),
+        mutation_probs = toolbox.get_modulated_distribution(population,
+                                                            bounds=(self.min_pop_mutation, self.max_pop_mutation),
                                                             base_rate=mutation_rate, kind=modulation)
 
         # get r/c indices of cells for which a flip happens - cells must be occupied
@@ -271,7 +281,6 @@ class Lattice:
         mask = nums < p_flip  # select cells for which a flip happens
 
         if mask_additional is not None:
-            print("In Lattice.flip_single_entry_per_cell: mask_additional not None. Deprecated.")
             assert mask.dtype == bool, "Requires boolean mask"
             mask = mask & mask_additional
 
@@ -303,11 +312,13 @@ class Lattice:
 
         if self.skill_mutation_rate is not None:
             if self.mutation_method == "random":
+                is_occupied = ~self.is_empty
                 self.skills = self.flip_single_entry_per_cell(self.skills, p_flip=self.skill_mutation_rate,
-                                                              mask_additional=None)
+                                                              mask_additional=is_occupied)
             elif self.mutation_method == "metropolis":
+                is_occupied = ~self.is_empty
                 self.skills = self.mutate_skill_metropolis(p_flip=self.skill_mutation_rate,
-                                                           mask_additional=None, scale=10)
+                                                           mask_additional=is_occupied, scale=self.metropolis_scale)
                 
             elif self.mutation_method == "adaptive":
                 self.mutate_skill_diff_ratios(mutation_rate=self.skill_mutation_rate,
@@ -337,6 +348,10 @@ class Lattice:
             mask = np.isnan(self.population[self.num_iter]) | (self.population[self.num_iter] < 0)
             self.population[self.num_iter][mask] = 0
 
+        if np.sum(self.population[self.num_iter]) == 0:  # handle empty lattice
+            raise RuntimeError("All villagers died (empty lattice). This occurs if the carrying capacity at the "
+                               "starting site is zero, or turns zero after mutations.")
+
         # Get split probability - based on global float draw
         prob_to_split = toolbox.get_modulated_distribution(self.population[self.num_iter],
                                                            bounds=(self.pop_min, self.pop_max), kind="linear")
@@ -347,7 +362,10 @@ class Lattice:
 
         # Count the number of cells that want to split and set helper variable
         num_cells_splitting = np.sum(prob_to_split > floats)
-        if num_cells_splitting <= (np.prod(self.prod.shape) / 2):
+
+        # If more than half of all habitable cells want to split, use reverse search strategy
+        thresh = (self.n_rows * self.n_cols - np.sum(self.is_uninhabitable)) / 2
+        if num_cells_splitting <= thresh:
             search_empty_cells = True
         else:
             search_empty_cells = False
