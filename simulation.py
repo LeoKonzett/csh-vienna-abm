@@ -109,20 +109,29 @@ class Lattice:
         # Set uninhabitable cells - sites where environment vector is all zero can never be populated
         self.is_uninhabitable = np.all(self.env == 0, axis=-1)
 
-    def set_fission_rules(self, migration_threshold=100, include_diagonals=False, search_distance_pixels=1,
-                          search_intelligently=False, max_distance_km=None):
-        """ Sets the rules governing village fission.
-        First, set the search matrix (moore vs. von-neumann neighborhood).
-        Second, set a migration threshold. Cells with productivity below this threshold are not settled.
-        Third, set a maximum distance. This considers actual distances vs pixel distances.
-        Fourth, determine if empty cells are selected based on a uniform distribution (random) or on a non-uniform
-        distribution.
+    def set_fission_rules(self, bounds, migration_threshold=None, include_diagonals=False, search_distance_pixels=1,
+                          search_intelligently=False, max_distance_km=None, dist_type="linear",
+                          params_are_relative=False):
+        """
+        Sets probability distribution that governs village fission.
+        :param bounds: tuple (min, max) - enforces p_split(N < min) = 0 and p_split(N > max) = 1
+        :param migration_threshold: int - sites below this threshold aren't settled
+        :param include_diagonals: bool - if True, include diagonals when searching for new sites
+        :param search_distance_pixels: int - allowed distance in horizontal / vertical pixels between origin and new site
+        :param search_intelligently: bool - if True, calculate probability distributions for search
+        :param max_distance_km: int or None - if not None, use km instead of pixel distances
+        :param dist_type: str - distribution type between the thresholds set by bounds
+        :param params_are_relative: bool - if True, multiply input vals by self.productivity_step_size
         """
         neigh_type = "moore" if include_diagonals else "von_neumann"
         self.indices_r, self.indices_c = toolbox.set_neighborhood(distance=search_distance_pixels,
                                                                   neigh_type=neigh_type)
-        self.migration_thresh = migration_threshold
-        assert self.migration_thresh > 0, "Current version requires a migration threshold larger than 0"
+
+        if migration_threshold is not None:
+            assert self.migration_thresh > 0, "Current version requires a migration threshold larger than 0"
+            self.migration_thresh = migration_threshold
+        else:  # migrate if at least one skill matches
+            self.migration_thresh = np.floor(self.productivity_step_size)
 
         self.search_intelligently = search_intelligently  # uniform distribution or not
 
@@ -131,12 +140,6 @@ class Lattice:
             self.max_distance = max_distance_km
             print(f"Villagers have maximum search radius of {max_distance_km} kilometres.")
 
-    def set_fission_distribution(self, bounds, thresh, params_are_relative=False, kind="linear"):
-        """Updates the parameters for the fission probability distribution. Parameters are
-        - kind: linear or sigmoid - type of distribution
-        - p_min and p_max (bounds) - population thresholds above / below which p(split) is 1 / 0
-        - migration threshold (thresh) - sites below this threshold aren't settled
-        - """
         assert bounds[1] > bounds[0], "Minimum needs to be smaller than maximum."
         self.pop_min, self.pop_max = bounds
         # Minimum requirements: Maximum population required to split is below step size - relevant for environments
@@ -146,10 +149,8 @@ class Lattice:
         except TypeError:
             print("Run meth.: Lattice.load_env first to initialize productivity_step_size attribute.")
 
-        assert thresh > 0, "Migration threshold needs to be larger than zero."
-        self.migration_thresh = thresh
-        assert kind in ["linear", "sigmoid"], "Valid distribution types are sigmoid and linear."
-        self.fission_distribution_type = kind
+        assert dist_type in ["linear", "sigmoid"], "Valid distribution types are sigmoid and linear."
+        self.fission_distribution_type = dist_type
 
         if params_are_relative:  # choose parameters based on productivity step size
             self.pop_min *= np.floor(self.productivity_step_size)
@@ -171,7 +172,7 @@ class Lattice:
         assert gaez_instance._nrows == self.shape[1] and gaez_instance._ncols == self.shape[2]
 
     def set_mutation_rules(self, bounds, env_mutation_rate=None, skill_mutation_rate=None,
-                           skill_mutation_method="adaptive", metropolis_scale=1,
+                           skill_mutation_method="adaptive", metropolis_scale=1, bounds_are_relative=False,
                            acceptance_probabilities=(1, 0.01, 0, 0.99), distribution_type="linear"):
         """Sets / updates parameters for mutation such as environment / skill mutation rate. Other parameters are
         - scaling ratio for metropolis mutation strategy
@@ -184,13 +185,18 @@ class Lattice:
 
         self.min_pop_mutation, self.max_pop_mutation = bounds
 
-        self.env_mutation_rate = env_mutation_rate  # environment mutation rate
-        self.skill_mutation_rate = skill_mutation_rate  # skill mutation rate
+        if env_mutation_rate is not None:
+            assert 0 <= env_mutation_rate <= 1, "Rate is probability and should be between 0 and 1"
+        if skill_mutation_rate is not None:
+            assert 0 <= skill_mutation_rate <= 1
+        self.env_mutation_rate = env_mutation_rate
+        self.skill_mutation_rate = skill_mutation_rate
 
         assert skill_mutation_method in ["random", "metropolis", "adaptive"], \
             "Valid methods are random, metropolis, and adaptive"
         self.mutation_method = skill_mutation_method
 
+        # TODO: Update how acceptance probabilities are handled - current version with tuple is inflexible
         self.metropolis_scale = metropolis_scale  # scaling ratio for Metropolis
         assert len(acceptance_probabilities) == 4
         assert acceptance_probabilities[0] > acceptance_probabilities[1]  # useful gain > non-useful gain
@@ -354,7 +360,8 @@ class Lattice:
 
         # Get split probability - based on global float draw
         prob_to_split = toolbox.get_modulated_distribution(self.population[self.num_iter],
-                                                           bounds=(self.pop_min, self.pop_max), kind="linear")
+                                                           bounds=(self.pop_min, self.pop_max),
+                                                           kind=self.fission_distribution_type)
         floats = self.rng.uniform(low=0.0, high=1.0, size=self.prod.shape)
 
         # Get empty cells after population update (incl. NaN and negative values that have been set to zero)
@@ -423,12 +430,14 @@ class Lattice:
             else:  # probability distribution to choose which occupied village splits
                 populations = self.population[self.num_iter, candidates_r, candidates_c]
 
-                # Alternative: Calculate productivity like above and
+                # Get productivity for migration threshold
                 env = self.env[rr, cc]  # environment at empty cell
                 skill = self.skills[candidates_r, candidates_c]  # skills of villages that will possibly split
                 prods = toolbox.calculate_productivity(env, skill,
                                                        prod_scaling=self.max_productivity, min_prod=self.prod_min)
 
+                # Here, we assume that fission happens if villagers have populations above the threshold
+                # instead of providing a fission distribution TODO: Include proper fission distribution
                 mask = (prods >= self.migration_thresh) & (populations > self.pop_min)
                 prods = prods[mask]
                 if prods.size == 0:
