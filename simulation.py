@@ -42,6 +42,10 @@ class Lattice:
         self.is_empty = self.population[0, :, :] == 0  # flag empty cells
         self.is_uninhabitable = np.array([False])  # set in method self.load_env
 
+        # Simulation speed parameters
+        self.use_valid_neighs_flag = False
+        self.has_valid_neighs = np.array([True])
+
         # Fission parameters
         self.pop_min, self.pop_max = None, None  # if population above pop_max -> fission with p = 1
         self.indices_r, self.indices_c = [], []  # indices to select neighbors
@@ -225,6 +229,18 @@ class Lattice:
             assert metropolis_scale is not None
             self.metropolis_scale = metropolis_scale  # scaling ratio for Metropolis
 
+    def set_speed_params(self):
+        """ Speed-up possible if: 1 - environment must be static 2 - skill mutation must be adaptive
+        # 3 - probability to lose a useful skill must be 0 """
+        if self.env_mutation_rate is None and self.mutation_method == "adaptive":
+            if self.p_lose_u == 0:
+                self.use_valid_neighs_flag = True
+                self.has_valid_neighs = np.ones([self.n_rows, self.n_cols], dtype=bool)
+
+        else:
+            print("Speed-up is only possible if environment ist static, if skill mutation method is adaptive, "
+                  "and if the probability to accept a flip that would lead to losing a useful skill is zero")
+
     def mutate_skill_metropolis(self, p_flip, mask_additional=None, scale=1):
         """Metropolis-like mutation for skills. Compares the ratio alpha = Prod(flip) / prod_previous and accepts
         the proposed flip if alpha = num where num is a uniform float in [0, 1]
@@ -392,7 +408,11 @@ class Lattice:
 
         cells_that_split = prob_to_split > floats
         if search_empty_cells:  # villagers that move to empty locations
-            idx_r, idx_c = np.nonzero(cells_that_split)
+            # Here: Add mask that says if cell has valid neighbors
+            if self.use_valid_neighs_flag:
+                idx_r, idx_c = np.nonzero(cells_that_split & self.has_valid_neighs)
+            else:
+                idx_r, idx_c = np.nonzero(cells_that_split)
         else:  # reverse search
             idx_r, idx_c = np.nonzero(self.is_empty & (~self.is_uninhabitable))  # look for empty and habitable cells
 
@@ -410,6 +430,10 @@ class Lattice:
         4 - take sites for which fission is True and which are above the migration threshold
         5 - get distribution based on carrying capacities to select site with the best skill / env match
         """
+        # how to add flag - we get possible neighbors first based on distance - check if they are empty and habitable
+        # don't use migration threshold !!
+        # if no empty and habitable cells - set has_valid_neighbors to False for rr, cc
+        # For revers search: We search loop through empty cells - no speedup needed
 
         # Loop through non-zero cells
         for rr, cc in zip(idx_r, idx_c):
@@ -430,6 +454,14 @@ class Lattice:
                 candidates_c = candidates_c[mask]
 
             if search_empty_cells:
+                if self.use_valid_neighs_flag:  # check if there are empty and habitable neighbors
+                    is_habitable = np.logical_not(self.is_uninhabitable[candidates_r, candidates_c])
+                    is_empty = self.is_empty[candidates_r, candidates_c]
+                    # if no empty and habitable neighbors, set has_valid_neighs flag to False
+                    # no empty and habitable neighbors - is_empty_and_habitable has only Falsies
+                    if not np.any(is_habitable & is_empty):
+                        self.has_valid_neighs[rr, cc] = False
+
                 env = self.env[candidates_r, candidates_c]
                 skill = self.skills[rr, cc]
                 prods = toolbox.calculate_productivity(skill, env,
@@ -501,10 +533,6 @@ class Lattice:
         if not any(self.indices_r):
             raise ValueError("Run method set_search_params first")
 
-        self.skill_array = np.zeros((self.shape[0], self.num_skill_vars))
-
         for _ in tqdm(range(1, self.population.shape[0]), leave=True, disable=disable_progress_bar):
-            if track_skill_start:
-                self.skill_array[self.num_iter-1] = self.skills[self.r0, self.c0]
             self.move_forward()
             self.num_iter += 1
