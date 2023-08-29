@@ -163,13 +163,16 @@ class Lattice:
             self.pop_max *= np.floor(self.productivity_step_size)
             self.migration_thresh *= np.floor(self.productivity_step_size)
 
-    def load_geo_constraints(self, arr_constraints):
+    def load_geo_constraints(self, arr_constraints, geo_constraints_scale=1.):
         """ Load an array to modulate the carrying capacity (productivity).
         The array must contain values between 0 and 1, where 1 denotes a maximum modulation
-        and 0 denotes no modulation. """
-        assert np.all(arr_constraints.shape == (self.shape[1], self.shape[2])), "Shapes don't match"
+        and 0 denotes no modulation.
+        The parameter geo_constraints_scale in range (0, 1) determines the weight of the modulation.
+        """
+        assert np.all(arr_constraints.shape == (self.n_rows, self.n_cols)), "Shapes don't match"
         assert np.all((0 <= arr_constraints) & (arr_constraints <= 1)), "Provide an array with values between 0 and 1"
-        self.geo_constraints = arr_constraints
+        assert 0 <= geo_constraints_scale <= 1
+        self.geo_constraints = arr_constraints * geo_constraints_scale
 
     def load_gaez_instance(self, gaez_instance):
         """load an instance of Global_AEZ data. Is pass-by-reference"""
