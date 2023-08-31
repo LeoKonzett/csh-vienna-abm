@@ -3,6 +3,8 @@
 import numpy as np
 from libtiff import TIFF
 
+import toolbox
+
 
 class GlobalAezV4:
     """Loader class for the Global Agro-Ecological Zones (GAEZ) version 4 data set published by UN FAO."""
@@ -59,48 +61,47 @@ class GlobalAezV4:
 
     def get_distance_matrix(self, verbose=False):
         """
-        goal: we have a (n_cols, n_rows, n_rows) matrix. If we query with e.g. index (0, 0, 0),
-        we get the distance for relative long. diff 0, and for latitude vals self._xul, self._xul
-        instead of np.meshgrid(), we use numpy broadcasting to save memory
+        We create an array of latitude (north to south) and
+        relative longitude values (east to west).
+        The output of this function is a matrix with dimension (n_rows, n_rows, n_cols), where
+        matrix[ii, jj, kk] = distances(latitude[ii], latitidue[jj], rel_longitude[kk]).
+        For example, for two points with (lat_1 = 34 = latitudes[20], lon_1 = 30) and
+        (lat_2 = 36 = latitudes[23], lon_2 = 40), the arc distance between the points can be accessed by
+        matrix[20, 23, 40-30=10].
         """
-        latitudes = np.linspace(self._lat_start, self._lat_start + (self._nrows - 1) * self._csize_deg, self._nrows)
+        latitudes = np.linspace(self._lat_start, self._lat_start - (self._nrows - 1) * self._csize_deg, self._nrows)
         longitudes_diff = np.linspace(0, (self._ncols - 1) * self._csize_deg,
                                       self._ncols)  # only relative values needed
 
+        # to radians
+        latitudes_rad = latitudes * np.pi / 180
+        longitudes_diff_rad = longitudes_diff * np.pi / 180
+
         # prepare for broadcasting
-        longitudes_diff = longitudes_diff[:, None, None]
-        lat_vals_x = latitudes[None, :, None]
-        lat_vals_y = latitudes[None, None, :]
+        lat_vals_1_arr = latitudes_rad[:, None, None]
+        lat_vals_2_arr = latitudes_rad[None, :, None]
+        longitudes_diff_arr = longitudes_diff_rad[None, None, :]
 
         # get distance - problem: We have a memory error but broadcasting works like a charm
         num_elements = self._ncols * self._nrows ** 2
         if num_elements > pow(10, 8):  # raise error if matrix takes more than ~ 100 MB
             raise MemoryError("Not enough memory can be allocated, consider a smaller window of interest.")
 
-        # convert to radians
-        lat_vals_x *= np.pi / 180
-        lat_vals_y *= np.pi / 180
-        longitudes_diff *= np.pi / 180
-
-        # apply haversine formula
-        a = np.sin((lat_vals_x - lat_vals_y) / 2) ** 2 + \
-            np.cos(lat_vals_x) * np.cos(lat_vals_y) * np.sin(longitudes_diff / 2) ** 2
-        self._distance_array = 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
-        self._distance_array *= self._radius_to_centre
-
+        self._distance_array = toolbox.haversine(lat_vals_1_arr, lat_vals_2_arr, longitudes_diff_arr)
         if verbose:
             print("\n Distance matrix has shape ", self._distance_array.shape,
                   "\n Window of Interest has columns and rows ", self._ncols, self._nrows)
 
     def get_arc_distance(self, p_origin, p_targets_r, p_targets_c):
-        """ To come. No lat / long conversion needed as the distance matrix takes care of that."""
+        """ Calculate the arc distance between an origin point and a set of target points."""
         r0, c0 = p_origin
 
         # longitude is column, latitude is row
         c_deltas = np.abs(c0 - p_targets_c)  # only relative difference matters
 
-        # first axis is relative longitudinal difference, second axis is latitude 1, third axis is latitude 2
-        distances = self._distance_array[c_deltas, r0, p_targets_r]  # c0 gets broadcast to match the array shapes
+        # first axis is latitude or origin point, second axis is latitude of target points,
+        # third axis is relative longitude between origin and target points
+        distances = self._distance_array[r0, p_targets_r, c_deltas]  # c0 gets broadcast to match the array shapes
 
         return distances
 
