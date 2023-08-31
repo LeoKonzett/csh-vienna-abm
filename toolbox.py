@@ -173,3 +173,12 @@ def get_envs_from_multiple_maps(input_arrays, water_var=0):
             count += 1
 
     return env
+
+
+def haversine(lat_1, lat_2, diff_long, r=6371):
+    """Calculate the haversine between points with (lat_1, x) and (lat_2, x + diff_lon). Expects RADIANS."""
+    assert np.all(lat_1 <= np.pi / 2), "Provide radians and not degrees"
+    assert np.all(lat_1 >= -np.pi / 2), "Provide radians and not degrees"
+    a = np.sin((lat_1 - lat_2) / 2) ** 2 + np.cos(lat_1) * np.cos(lat_2) * np.sin(diff_long / 2) ** 2
+    d = 2 * np.arcsin(np.sqrt(a))
+    return d * r
